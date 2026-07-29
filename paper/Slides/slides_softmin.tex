@@ -1,0 +1,377 @@
+\documentclass{beamer}
+\usepackage{amsfonts,amsmath,oldgerm}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{float}
+
+\usetheme{dmpisa} % Here the call to the beamer theme
+\usepackage{amssymb}
+\usepackage{physics}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\newcommand{\prefactor}[2]{A_{#1,#2}}
+
+\title[Softmin Energy Minimization]{Global Optimization via Softmin Energy Minimization}
+\author[AA, MR, SS, VC]{Andrea Agazzi, Marco Romito, \emph{Samuele Saviozzi}, Vittorio Carlei}
+\date{June 2026}
+
+\begin{document}
+
+\frame{\titlepage}
+
+% Section 1: Introduction
+\section{Introduction}
+
+\begin{frame}
+\frametitle{The Global Optimization Problem}
+\begin{itemize}
+  \item \textbf{Goal}: Find global minimum of $\min_{x \in \mathbb{R}^d} f(x)$
+  \item \textbf{Challenge}: Non-convex functions with multiple local minima
+  \item Standard gradient descent gets trapped in local minima
+  \item Need methods that balance exploration and exploitation
+\end{itemize}
+\pause
+\vspace{0.5cm}
+\textbf{Common approaches:}
+\begin{itemize}
+  \item \textbf{Particle Swarm Optimization}: multiple interacting particles, usually metaheuristic methods. (PSO, CBO, etc...)
+  \item \textbf{Simulated Annealing}: gradient descent + noise (Langevin dynamics) that uses temperature annealing.
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\frametitle{Key Insight: Particle Cooperation}
+Our approach combines:
+\begin{enumerate}
+  \item \textbf{Multiple particles}: parallel exploration
+  \item \textbf{Gradient information}: exploit when available
+  \item \textbf{Cooperation mechanism}: particles interact via Softmin Energy
+\end{enumerate}
+\pause
+
+\vspace{0.5cm}
+\textbf{Main innovation:} Follow the gradient of the \textbf{Softmin Energy}, a smooth approximation of the minimum value.
+
+\end{frame}
+
+% Section 2: Softmin Energy
+\section{Softmin Energy Formulation}
+
+\begin{frame}
+\frametitle{The Softmin Energy Functional}
+
+Given $n$ particles $x = (x_1, \ldots, x_n)$ with $x_i \in \mathbb{R}^d$, the Softmin Energy is:
+
+\[
+    J_\beta(x) = \sum_{i=1}^{n} \frac{\exp(-\beta f(x_i))}{\sum_{j=1}^{n} \exp(-\beta f(x_j))} f(x_i)
+\]
+\pause
+
+\textbf{Interpretation:}
+\begin{itemize}
+  \item Weighted average of function values at particle positions
+  \item Weight of particle $i$ depends on how low its function value is
+  \item Parameter $\beta > 0$ controls smoothness:
+  \begin{itemize}
+    \item $\beta \to 0$: recovers average $\frac{1}{n}\sum_i f(x_i)$
+    \item $\beta \to \infty$: approaches hard minimum $\min_i f(x_i)$
+  \end{itemize}
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\frametitle{Gradient of Softmin Energy}
+\begin{enumerate}
+    \item Let $w_k = e^{-\beta f(x_k)}(\sum_j e^{-\beta f(x_j)})^{-1}$ denote the Gibbs weight of particle $x_k$
+    \item Dynamic pre-factor $\prefactor{t}{k} = w_k\left[1 - \beta(f(x_k) - J_\beta(\mathbf{x}))\right]$.
+\end{enumerate}
+\pause
+The gradient of $J_\beta(\mathbf{x})$ with respect to particle $x_k$ is given by:
+\begin{equation}
+    \nabla_{x_k} J_\beta(\mathbf{x}) =\prefactor{t}{k} \nabla f(x_k).
+    \label{eq:softmin-gradient}
+\end{equation}
+The dynamic pre-factor $\prefactor{t}{k} = w_k\beta\left[1/\beta - f(x_k) + J_\beta(\mathbf{x})\right]$ dictates the effective direction of the gradient flow
+\pause
+
+\textbf{Key observation: }
+\begin{enumerate}
+    \item If $f(x_k) < J_\beta(\mathbf{x}) + 1/\beta$, $\prefactor{t}{k}$ is strictly positive, and the particle performs standard gradient descent on $f$.
+    \item If $f(x_k) > J_\beta(\mathbf{x}) + 1/\beta$, the pre-factor becomes negative, reversing the flow.
+\end{enumerate}
+\end{frame}
+
+\begin{frame}
+\frametitle{Gradient Flow Dynamics}
+
+\textbf{Deterministic dynamics:}
+\begin{equation}
+dx_t = -n \nabla J_{\beta_t}(x_t) dt
+\end{equation}
+
+\textbf{Stochastic dynamics (with exploration noise):}
+\begin{equation}
+dx_t = -n \nabla J_{\beta_t}(x_t) dt + \sqrt{2\sigma} dB_t
+\end{equation}
+
+where $B_t$ is Brownian motion and $\sigma > 0$ controls noise intensity. The parameter $\beta_t$ can decay over time.
+\end{frame}
+
+% Section 3: Theory
+\section{Theoretical Results}
+
+\subsection{Stability of Stationary Points}
+
+\begin{frame}
+\frametitle{Convergence for Strongly Convex Functions}
+
+\textbf{Theorem 2.2:} For $\lambda$-strongly convex $f$ with min value 0:
+
+At any stationary point $\bar{x}$:
+\begin{itemize}
+  \item At least $m \geq 1$ particles satisfy $\nabla f(x) = 0$ (at critical points)
+  \item Remaining $n-m$ particles satisfy $f(x) = \frac{1}{\beta} + J_\beta(x)$
+\end{itemize}
+\pause
+
+\textbf{Stability:}
+\begin{itemize}
+  \item If $m = n$: \textbf{stable}
+  \item If $m = n-1$: Unstable saddle point $\Rightarrow$ exploration
+\end{itemize}
+\pause
+\textbf{Implication:} The method finds the global minimum while maintaining exploratory behavior at suboptimal particles.
+\end{frame}
+
+% Section 4: Hitting Times
+\subsection{Faster Barrier Crossing}
+
+\begin{frame}{Exit Times from Local Minima: Intuition}
+    To develop intuition, Consider a standard double well landscape
+    \only<1>{
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.45\linewidth]{NIPS/Softmin/images/Screenshot 2026-01-20 125125.png}
+    \end{figure}
+    }
+    \only<2>{
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.45\linewidth]{NIPS/Softmin/Slides/cat2.jpg}
+    \end{figure}
+    }
+    \only<3>{
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.45\linewidth]{NIPS/Softmin/Slides/cat1.jpg}
+    \end{figure}
+    }
+    \only<4>{
+    \begin{figure}
+        \centering
+        \includegraphics[width=0.45\linewidth]{NIPS/Softmin/Slides/cat3.jpg}
+    \end{figure}
+    }
+\end{frame}
+
+\begin{frame}{Exit Times from Local Minima}
+    By the Freidlin-Wentzell Large Deviation Principle (LDP), the exponential scale of the exit time is governed by the minimum action path required to reach the boundary $\partial D$. Let $V_1$ be the exact one-particle Freidlin-Wentzell quasipotential
+    
+    We define the explicit Softmin barrier bound $\overline{V}_\beta$ as:
+    \begin{equation}
+        \overline{V}_\beta := \max\left\{ \frac{n}{2(n-1)\beta}, \frac{\beta}{2}\left(f^\ast-\frac1\beta\right)_+^2 \right\}
+    \end{equation}
+\end{frame}
+
+\begin{frame}{Exit Times from Local Minima: Result}
+    \begin{block}{Theorem 3.3}
+        Assume that $x^\ast$ is the minimal saddle point on the boundary $\partial D$. Then there exists $n_0\in\mathbb{N}$ such that, for all $n\ge n_0$
+        \[
+            \lim_{\sigma\downarrow0} \sigma\log \mathbb{E}_{\bar x}\tau_k^\sigma = V_1.
+        \]
+        Moreover, the probability that exactly one particle exits $D$ during the transition tends to $1$ as $\sigma\downarrow0$. Furthermore, the exponential scale is bounded by:
+        \[
+            V_1\le \overline{V}_\beta.
+        \]
+        Consequently, for every $\eta>0$, there exists $\sigma_0>0$ such that, for all $0<\sigma<\sigma_0$,
+        \[
+            \mathbb{E}_{\bar x}\tau_k^\sigma \le \exp\left(\frac{\overline{V}_\beta+\eta}{\sigma}\right).
+        \]
+    \end{block}
+\end{frame}
+
+\begin{frame}\frametitle{Sketch of the proof}
+    \textbf{Establish channel separation:} we prove that multi-particle saddles ($V_q$ for $q \ge 2$) have strictly larger action than the one-particle saddle $V_1$.\\
+    \pause
+    \textbf{Compute the upper bound $\overline{V}_\beta$:} we evaluate a specific channel where $n-1$ particles are frozen at $x_{\min}$ while a single active particle escapes. This provides a strict upper bound. \\
+    \pause
+    This 1D channel structurally decomposes into two bottlenecks:
+    \begin{itemize}
+        \item \textbf{Ejection:} Bounding the active particle's Gibbs weight yields a linear majorant for the effective learning rate. Integrating this majorant caps the ejection action at $n/(2(n-1)\beta)$.
+        \pause
+        \item \textbf{Descent:} Integrating the maximal opposing gradient provides a strict bound on the descent action of $(\beta/2)(f^* - 1/\beta)_+^2$.
+    \end{itemize}
+    Taking the maximum of these two sequential bottlenecks yields $V_1 \le \overline{V}_\beta$.
+\end{frame}
+
+\subsection{Speed of Convergence}
+\begin{frame}
+
+\frametitle{Convergence to Local Minima}
+
+\textbf{Theorem 3.7:} For locally strongly convex $f$, if particle starts in "strongly minimizing regime":
+$$\|x_k(t) - x^*\| \leq \|x_k(0) - x^*\| e^{-\lambda t}$$
+
+Convergence rate: $O(e^{-\lambda t})$ where $\lambda$ is strong convexity constant.
+\pause
+
+\vspace{0.5cm}
+\textbf{Comparison with Langevin dynamics:}
+\begin{itemize}
+  \item Both achieve exponential convergence
+  \item Softmin method has prefactor $\prefactor{t}{k} > 1$ vs. standard prefactor $1$
+\end{itemize}
+\end{frame}
+
+% Section 5: Numerical Experiments
+\section{Numerical Experiments}
+
+\begin{frame}
+\frametitle{Benchmark 1: 1D Double Well}
+
+\begin{figure}[htbp]
+    \centering
+    % Left Image
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{NIPS/Softmin/images/1d_double_well_ls.png}
+    \end{subfigure}
+    \hfill % This pushes the two images apart
+    % Right Image
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{NIPS/Softmin/images/1dim_decay_big.png}
+    \end{subfigure}
+    \label{fig:1d_double_well}
+\end{figure}
+
+\textbf{Result:} Softmin method (fixed $\beta$ and decaying $\beta$) escapes local minima faster for high barriers.
+\end{frame}
+
+\begin{frame}
+\frametitle{Benchmark 2: 2D Quadruple Well}
+
+\begin{figure}[htbp]
+    \centering
+    % Left Image
+    \begin{subfigure}[b]{0.38\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{NIPS/Softmin/images/2d_double_well_ls.png}
+    \end{subfigure}
+    \hfill % This pushes the two images apart
+    % Right Image
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{NIPS/Softmin/images/2dim_big.png}
+    \end{subfigure}
+    \label{fig:2d_double_well}
+\end{figure}
+
+\textbf{Result:} Superior performance at high barriers. Transition times show different scaling law compared to Simulated Annealing.
+\end{frame}
+
+\begin{frame}
+\frametitle{Benchmark 3: Ackley Function}
+
+\begin{figure}[htbp]
+    \centering
+    % Left Image
+    \begin{subfigure}[b]{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{NIPS/Softmin/images/Ackley_function_ls.png}
+    \end{subfigure}
+    \hfill % This pushes the two images apart
+    % Right Image
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{NIPS/Softmin/images/high_dim.png}
+    \end{subfigure}
+    \label{fig:ackley}
+\end{figure}
+
+\textbf{Result:} Softmin method scales better with the dimension.
+\end{frame}
+
+% Section 6: Summary
+\section{Summary}
+
+\begin{frame}
+\frametitle{Key Contributions}
+
+\begin{enumerate}
+  \item \textbf{Novel method:} Gradient-based particle swarm via Softmin Energy
+  
+  \item \textbf{Theoretical guarantees:}
+  \begin{itemize}
+    \item Convergence to global minimum for strongly convex functions
+    \item Exponential speedup in barrier crossing (lower effective barriers)
+    \item Exponential convergence rates to local minima
+  \end{itemize}
+  
+  \item \textbf{Practical advantages:}
+  \begin{itemize}
+    \item Particle cooperation speeds up potential barriers crossing
+    \item Outperforms Particle Swarm methods in various regimes on benchmark problems
+  \end{itemize}
+\end{enumerate}
+\end{frame}
+
+\begin{frame}
+\frametitle{Why This Works}
+
+\textbf{The mechanism:}
+\begin{itemize}
+  \item Softmin Energy creates cooperative interaction between particles
+  \item Good particles (low function values) converge to minima faster
+  \item Bad particles are pushed to explore and escape local minima
+\end{itemize}
+
+\vspace{0.5cm}
+\textbf{Temperature annealing:}
+\begin{itemize}
+  \item Parameter $\beta$ plays role analogous to temperature
+  \item Start with $\beta$ big for broad exploration and decrease over time
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Future Directions}
+
+\begin{itemize}
+  \item Extend proofs to weakly convex and non-convex functions
+  \item Adaptive parameter tuning for $\beta$
+  \item Application to machine learning (training neural networks)
+  \item Mean-field analysis of the infinite particle limit
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Thank You For The Attention!}
+
+\begin{figure}
+    \centering    \includegraphics[width=0.25\linewidth]{NIPS/Softmin/images/Qq1hbauAiniaN4V.png}
+\end{figure}
+
+\begin{itemize}
+  \item Paper: \textit{Global Optimization via Softmin Energy Minimization}
+  \item Contact: samuele.saviozzi@phd.unipi.it
+\end{itemize}
+\end{frame}
+
+\end{document}

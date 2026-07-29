@@ -1,0 +1,539 @@
+\documentclass{article}
+
+\usepackage[english]{babel}
+\usepackage{amsthm}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{mathtools}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{xfrac}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+\usepackage{todonotes}
+\newcommand{\aanote}[1]{\todo[color=blue!35]{\small AA: #1}}
+\newcommand{\dd}{\mathrm d}
+
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+
+\usepackage[preprint]{neurips_2026}
+
+\usepackage[capitalize,noabbrev]{cleveref}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% THEOREMS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\DeclareMathOperator*{\argmin}{arg\,min}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\xx}{\mathbf{x}}
+\newcommand{\XX}{\mathbf{X}}
+\newcommand{\BB}{\mathbf{B}}
+
+\title{Global Optimization via Softmin Energy Minimization}
+
+\author{
+Samuele Saviozzi \\
+Department of Mathematics\\
+University of Pisa\\
+Pisa, Italy \\
+\texttt{samuele.saviozzi@phd.unipi.it} \\
+\And
+Andrea Agazzi \\
+Institute of Mathematical Statistics \\and Actuarial Science\\
+University of Bern\\
+Bern, Switzerland\\
+\texttt{andrea.agazzi@unibe.ch} \\
+\AND
+Vittorio Carlei \\
+Department of Business Economics\\
+University Gabriele D'Annunzio\\
+Chieti, Italy \\
+\texttt{carlei@unich.it} \\
+\And
+Marco Romito \\
+Department of Mathematics\\
+University of Pisa\\
+Pisa, Italy \\
+\texttt{marco.romito@unipi.it} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We study a fixed-population overdamped Langevin system on particle space whose potential is the Gibbs-weighted objective average \(J_\beta(\xx)=\sum_i w_i(\xx)f(x_i)\). The component drift of particle \(x_k\) is a scalar multiple \(-a_k(\xx)\nabla f(x_k)\) of the local gradient, and the scalar \(a_k\) changes sign according to the particle's objective value relative to the ensemble: particles below a Gibbs threshold descend, particles above it ascend. Our contribution is the analysis of this nonseparable potential and of the sign-changing drift it induces. We first characterize the stable equilibria of the joint gradient flow \emph{without any convexity assumption}: every stable equilibrium consists of particles sitting at critical points of \(f\) whose type is fixed by the sign of \(a_k\), at least one of which is a local minimum. We then prove an \emph{ensemble-level} descent estimate valid for any (possibly annealed) temperature schedule: under a Polyak--\L{}ojasiewicz condition the best objective value in the ensemble decays at least at the ordinary gradient-flow rate. Finally, in one dimension and at fixed \(\beta\), we construct an explicit admissible escape channel and obtain an \(\mathcal O(\beta^{-1})\) upper bound on the Freidlin--Wentzell exponent for the first exit of the joint diffusion from a local basin, together with a proof that the Softmin-induced post-saddle well is strictly shallower than the initial barrier. These are upper bounds and structural results, not Eyring--Kramers prefactor asymptotics and not a proof of global convergence. Numerical experiments validating the mechanism are deferred to a companion section.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Non-convex optimization problems are notoriously difficult, as the presence of multiple local minima can trap gradient-based algorithms. Gradient descent performs well for convex objectives with a single minimum but typically converges to suboptimal local minima in more complex landscapes. This challenge is prominent in machine learning, where training deep networks on non-convex losses leads to inconsistent performance across initializations, and in reinforcement learning, where escaping sharp local minima remains a bottleneck.
+
+A classical remedy adds a noise term to the dynamics so that the system can escape local minima, leading to stochastic gradient methods such as Langevin dynamics~\cite{CoffeyKalmykovWaldron2004}. These methods are effective but exhibit poor transition times between minima: the escape rate of a particle subject to Gaussian noise depends exponentially on the height of the surrounding potential barrier~\cite{berglund2011kramers}. Methods that improve on this rate usually assume additional structure on \(f\); for instance, when \(f\) decomposes as a sum of simpler functions \(\psi_i\), the Method of Moments~\cite{meziat2003method} applies, a structure common in signal processing and machine learning~\cite{shao1993signal}. In more general settings, Simulated Annealing and its variants~\cite{bolte2024swarm,xu2018global} use a decaying temperature schedule to shift from exploration to local refinement.
+
+A natural extension replaces a single trajectory with a population of particles exploring the search space in parallel. Even independent Langevin particles reduce expected transition times through statistical averaging, and letting particles \emph{cooperate} can improve exploration further. Particle cooperation is central to metaheuristic methods~\cite{bandaru2016metaheuristic,yang2020nature}, which perform strongly in practice but are typically hard to analyze rigorously~\cite{hussain2019metaheuristic,rajwar2023exhaustive}.
+
+\paragraph{The Softmin energy.}
+The method studied here couples particles through the Softmin energy functional, which interpolates between the average and the hard minimum of the objective values across the population. Recall that the Softmin function underlies the Gibbs distribution, in which the probability of sampling \(x_i\) is \(\mathbb P[i]=e^{-\beta x_i}/\sum_j e^{-\beta x_j}\), concentrating on \(\min_i x_i\) as \(\beta\to\infty\) and becoming uniform as \(\beta\to0\)~\cite{bertsekas1997nonlinear}; this construction underlies stochastic optimization~\cite{ackley1985boltzmann,srivastava2012multimodal,gelfand1990sampling,gelfand2000gibbs} and exploration in reinforcement learning~\cite{pan2019reinforcement,haarnoja2017reinforcement}. Given a differentiable \(f:\R^d\to\R\) and a population \(\xx=(x_1,\dots,x_n)\), \(x_i\in\R^d\), the Softmin energy is
+\begin{equation}
+    J_\beta(\xx)=\sum_{i=1}^n \frac{e^{-\beta f(x_i)}}{\sum_{j=1}^n e^{-\beta f(x_j)}}\,f(x_i),
+    \label{eq:softmin-energy}
+\end{equation}
+a smooth approximation of \(\min_i f(x_i)\): larger \(\beta\) sharpens the approximation, while \(\beta\to0\) recovers the average \(\frac1n\sum_i f(x_i)\). To minimize \(J_\beta\) we consider the joint overdamped Langevin diffusion on \(\R^{nd}\),
+\begin{equation}\label{eq:sde}
+    \dd\XX_t = -\nabla U_\beta(\XX_t)\,\dd t+\sqrt{2\sigma}\,\dd\BB_t, \qquad U_\beta:=nJ_\beta,
+\end{equation}
+where \((\BB_t)_{t\ge0}\) is standard \(nd\)-dimensional Brownian motion and \(\sigma>0\). The factor \(n\), absorbable by a time change, normalizes the component drift; see~\eqref{eq:component-drift} below.
+
+\subsection{Contribution}
+\label{sec:contribution}
+
+Equation~\eqref{eq:sde} is an overdamped Langevin diffusion on the extended space \(\R^{nd}\) with joint potential \(U_\beta=nJ_\beta\). Our contribution is not the use of Langevin dynamics per se, but the analysis of this particular \emph{nonseparable} potential and of the sign-changing component drift it induces. Writing
+\[
+    a_k(\xx):=n\,w_k(\xx)\bigl[1-\beta(f(x_k)-J_\beta(\xx))\bigr],
+    \qquad
+    w_k(\xx):=\frac{e^{-\beta f(x_k)}}{\sum_j e^{-\beta f(x_j)}},
+\]
+the component drift is \(\dot x_k=-a_k(\xx)\nabla f(x_k)\); thus \(a_k>0\) produces gradient \emph{descent} and \(a_k<0\) produces gradient \emph{ascent}. This is the mechanism the paper analyzes.
+
+\paragraph{Equilibrium geometry and role assignment.}
+We characterize the stable equilibria of the deterministic flow with no convexity assumption on \(f\) (\ref{thm:stable-stationary-points}). At any stable equilibrium, every particle sits at a critical point of \(f\) with \(a_k\ne0\), the sign of \(a_k\) fixes the type of the critical point (descent particles at minima, ascent particles at maxima), and at least one particle is at a local minimum. Conversely, consensus at a nondegenerate local minimum is asymptotically stable (\ref{cor:consensus-stability}). An equilibrium containing a noncritical zero-rate particle is unstable. No ``local on every compact set'' convexity hypothesis is used.
+
+\paragraph{Ensemble-level descent.}
+The sign of \(a_k\) is \emph{not} invariant for a fixed particle, since \(a_k\) depends on every coordinate through \(J_\beta\); the corresponding invariance claim in an earlier version of this work does not hold. The correct invariant statement is ensemble-level: every particle attaining the current minimum objective value has \(a_k\ge1\). Consequently, under a Polyak--\L{}ojasiewicz inequality on the relevant sublevel set, the best objective value in the ensemble decays at least at the ordinary gradient-flow rate (\ref{thm:ensemble-min}). The statement holds for any positive, possibly time-dependent, temperature schedule \(\beta_t\), and in particular covers annealing.
+
+\paragraph{A computable basin-exit upper bound.}
+For fixed \(\beta\) and \(d=1\), freezing \(n-1\) particles at a local minimizer reduces the joint potential along a one-particle path to \(u(r)=nre^{-\beta r}/(n-1+e^{-\beta r})\), whose global maximum is \(\mathcal O(\beta^{-1})\) uniformly in the physical barrier height (\ref{thm:transition-time}). In the one-dimensional adjacent-well setting this yields a Freidlin--Wentzell upper bound on the first basin-exit exponent that is strictly below the physical barrier, and it shows that the Softmin-induced post-saddle well is strictly shallower than the initial barrier. We deliberately do not claim an exact Eyring--Kramers formula, dominance of the one-particle channel, or global convergence.
+
+\subsection{Related work}
+\label{sec:related-work}
+
+\paragraph{Langevin and stochastic-gradient Langevin methods.} Equation~\eqref{eq:sde} belongs to the family of Langevin diffusions. Stochastic-gradient Langevin dynamics was introduced for scalable Bayesian learning by Welling and Teh~\cite{welling2011bayesian}, with nonasymptotic guarantees for nonconvex learning developed by Raginsky, Rakhlin and Telgarsky~\cite{raginsky2017nonconvex}. These methods act on the original parameter space with a single objective, whereas our drift is the gradient of a nonseparable potential on the product space; the distinction is the potential geometry, not the stochastic-differential-equation template.
+
+\paragraph{Interacting-particle Langevin algorithms.}
+Interacting-particle Langevin algorithms (IPLA) also formulate Langevin diffusions on extended particle spaces with rigorous nonasymptotic analyses, notably for maximum marginal likelihood in latent-variable models~\cite{akyildiz2025interacting}, with proximal variants for nonsmooth models~\cite{encinar2025proximal}. Their interactions arise from latent-variable likelihood structure and target statistical estimation, while the present potential is the Gibbs-weighted objective average \(J_\beta\) and is designed to create sign-changing optimization roles. This is a difference in interaction design and target problem, not a claim of unrelated algorithmic classes.
+
+\paragraph{Consensus, particle-swarm, and swarm-gradient optimization.}
+Consensus-based optimization (CBO)~\cite{CarrilloChoiTotzeckTse2018,pinnau2017consensus,carrillo2021consensus,fornasier2024consensus}, particle swarm optimization (PSO)~\cite{kennedy1995particle,noel2012new}, genetic algorithms~\cite{Goldberg1989}, ant colony optimization~\cite{DorigoStutzle2004}, and swarm-gradient dynamics~\cite{bolte2024swarm,riedl2023gradient,tang2024discrete} combine population information with local or stochastic motion. CBO coordinates particles through a Gibbs-weighted spatial consensus and is typically gradient-free; PSO uses personal and global best positions; swarm-gradient methods derive gradient-like population dynamics. Our method instead takes gradient descent of the scalar joint functional \(J_\beta\). Its distinctive algebraic feature is \(\nabla_{x_k}J_\beta=(a_k/n)\nabla f(x_k)\): the interaction changes the sign and magnitude of the local gradient without introducing a consensus position. This also distinguishes \(J_\beta\) from the log-sum-exp (free-energy) functional \(F_\beta(\xx)=-\beta^{-1}\log\sum_i e^{-\beta f(x_i)}\), whose gradient \(\nabla_{x_k}F_\beta=w_k\nabla f(x_k)\) preserves descent for every particle, so that low-weight particles merely stagnate rather than reversing their flow.
+
+\paragraph{Scope of the novelty claim.}
+We claim novelty only for using the Gibbs-weighted objective average \(J_\beta\) itself as the joint potential, and for the resulting equilibrium, descent, and barrier calculations. We do not claim novelty for extended-space Langevin dynamics, Gibbs weights, stochastic-gradient noise, or population-based global search.
+
+\subsection{Structure of the paper}
+\label{sec:structure}
+
+\ref{sec:gradient-flow-dynamics} derives the component dynamics and characterizes the stable equilibria of the deterministic flow without convexity. \ref{sec:hitting-times} treats the noisy dynamics: it establishes the one-dimensional fixed-\(\beta\) basin-exit upper bound and post-saddle passage (\ref{sec:exit-times}) and the ensemble-minimum descent estimate (\ref{sec:convergence-rate}). \ref{sec:numerical-experiments} specifies the numerical protocol. All proofs are collected in \ref{apx:technical-proofs}.
+
+\section{Deterministic Softmin dynamics}
+\label{sec:gradient-flow-dynamics}
+
+Throughout this section \(\beta>0\) is fixed and \(f\in C^2(\R^d)\). Set \(U_\beta:=nJ_\beta\) and consider the deterministic gradient flow
+\begin{equation}
+    \dot\xx_t=-\nabla U_\beta(\xx_t)=-n\nabla J_\beta(\xx_t).
+    \label{eq:gradient-flow}
+\end{equation}
+With the Gibbs weights and the coefficient
+\begin{equation}
+    w_k(\xx)=\frac{e^{-\beta f(x_k)}}{\sum_{j=1}^n e^{-\beta f(x_j)}},
+    \qquad
+    a_k(\xx)=n\,w_k(\xx)\bigl[1-\beta(f(x_k)-J_\beta(\xx))\bigr],
+    \label{eq:coefficient}
+\end{equation}
+a direct computation (\ref{lem:gradient-hessian}) gives the component gradient and drift
+\begin{equation}
+    \nabla_{x_k}U_\beta(\xx)=a_k(\xx)\nabla f(x_k),
+    \qquad
+    \dot x_k=-a_k(\xx)\nabla f(x_k).
+    \label{eq:component-drift}
+\end{equation}
+Since \(nw_k>0\), the sign of \(a_k\) equals the sign of \(1-\beta(f(x_k)-J_\beta(\xx))\). Hence particle \(k\) descends (\(a_k>0\)) precisely when
+\[
+    f(x_k)<J_\beta(\xx)+\tfrac1\beta,
+\]
+and ascends (\(a_k<0\)) when \(f(x_k)>J_\beta(\xx)+\tfrac1\beta\). This classification is \emph{instantaneous}: because \(a_k\) depends on every coordinate, a particle need not keep its sign along the flow.
+
+Two elementary identities drive the analysis. First, summing~\eqref{eq:coefficient} and using \(\sum_k w_k=1\) and \(\sum_k w_k f(x_k)=J_\beta\),
+\begin{equation}
+    \sum_{k=1}^n a_k(\xx)=n\qquad\text{for every }\xx\in\R^{nd}.
+    \label{eq:sum-a}
+\end{equation}
+Thus at least one coefficient is always positive. Second, at a configuration in which every particle is critical the mixed second derivatives vanish, because the Hessian blocks of \(U_\beta\) are outer products carrying a factor \(\nabla f\) (\ref{lem:gradient-hessian}).
+
+\subsection{Equilibria and stability}
+\label{sec:stationary-points}
+
+\begin{theorem}[Stable equilibria]
+\label{thm:stable-stationary-points}
+Let \(f\in C^2(\R^d)\), let \(\beta>0\), and let \(\bar\xx=(\bar x_1,\dots,\bar x_n)\) be a locally asymptotically stable equilibrium of \eqref{eq:gradient-flow}. Then for every \(k\in\{1,\dots,n\}\):
+\begin{enumerate}
+    \item \(\nabla f(\bar x_k)=0\);
+    \item \(a_k(\bar\xx)\ne0\);
+    \item the sign of \(a_k(\bar\xx)\) fixes the type of \(\bar x_k\):
+    \[
+        a_k(\bar\xx)>0\ \Longrightarrow\ \bar x_k\text{ is a local minimum of }f,
+        \qquad
+        a_k(\bar\xx)<0\ \Longrightarrow\ \bar x_k\text{ is a local maximum of }f,
+    \]
+    with \(a_k(\bar\xx)>0\iff f(\bar x_k)<J_\beta(\bar\xx)+\tfrac1\beta\).
+\end{enumerate}
+Moreover, by \eqref{eq:sum-a}, at least one particle sits at a local minimum of \(f\).
+\end{theorem}
+
+\begin{proof}
+See \ref{apx:technical-proofs}.
+\end{proof}
+
+% The converse, that consensus at a genuine local minimum is stable, follows directly from the block-diagonal Hessian at critical configurations.
+
+% \begin{corollary}[Stability of consensus]
+% \label{cor:consensus-stability}
+% Let \(z\in\R^d\) be a nondegenerate local minimum of \(f\), i.e. \(\nabla f(z)=0\) and \(\nabla^2 f(z)\succ0\). Then the consensus configuration \(\bar\xx=(z,\dots,z)\) is a linearly, hence locally asymptotically, stable equilibrium of \eqref{eq:gradient-flow}.
+% \end{corollary}
+
+% \begin{proof}
+% By \eqref{eq:component-drift}, \(\nabla U_\beta(\bar\xx)=0\), so \(\bar\xx\) is an equilibrium. At consensus \(w_k=1/n\) and \(f(x_k)=J_\beta=f(z)\), whence \(a_k(\bar\xx)=1\). By \ref{lem:gradient-hessian} the Hessian is block diagonal with each block equal to \(a_k(\bar\xx)\nabla^2 f(z)=\nabla^2 f(z)\succ0\). Therefore \(\nabla^2 U_\beta(\bar\xx)\succ0\); linearization of the gradient flow gives local asymptotic stability.
+% \end{proof}
+
+% \begin{remark}[Necessity of noise]
+% \label{rem:trapping}
+% \ref{cor:consensus-stability} applies to \emph{any} nondegenerate local minimum, including suboptimal ones, so full consensus at a bad minimum is trapped for the deterministic flow. But the trap set is larger than this. By \ref{lem:gradient-hessian}, at \emph{any} configuration where every particle is critical, the Hessian is block diagonal with blocks \(a_k(\bar\xx)\nabla^2f(\bar x_k)\). If \(\bar x_k\) is a nondegenerate local \emph{maximum} with \(a_k(\bar\xx)<0\) (i.e.\ its objective value exceeds the Softmin threshold \(J_\beta(\bar\xx)+1/\beta\)), then \(\nabla^2f(\bar x_k)\prec0\) and the product \(a_k(\bar\xx)\nabla^2f(\bar x_k)\) is again positive definite. Hence configurations with some particles at local minima and others pinned at sufficiently high local maxima are themselves locally asymptotically stable equilibria of \eqref{eq:gradient-flow}, not only full consensus.
+
+% What \ref{thm:stable-stationary-points} destabilizes is strictly narrower: a configuration containing a particle at a \emph{noncritical} point with \(a_k=0\) (forced there because \(\sum_ja_j=n\) cannot vanish identically). A particle already sitting at a maximum is critical and is not covered by this instability. Consequently the deterministic dynamics can strand the ensemble at any of a lattice of mixed minima/maxima equilibria, and the Brownian term in \eqref{eq:sde} is needed to escape all of these, not merely the fully collapsed suboptimal consensus.
+% \end{remark}
+
+\section{Hitting times and ensemble descent}
+\label{sec:hitting-times}
+
+We now turn to the noisy dynamics~\eqref{eq:sde}. Componentwise,
+\begin{equation}
+    \dd x_k(t)=-a_k(\XX_t)\nabla f(x_k(t))\,\dd t+\sqrt{2\sigma}\,\dd B_t^k,
+    \label{eq:softmin-langevin}
+\end{equation}
+so \(a_k\) acts as a state-dependent, sign-changing learning rate. The rigorous exit analysis below is carried out for \emph{fixed} \(\beta\) and physical dimension \(d=1\); the time-inhomogeneous (annealed) case \(\beta=\beta_t\) requires a separate treatment and is used only heuristically in \ref{sec:numerical-experiments}. The ensemble-descent estimate of \ref{sec:convergence-rate}, by contrast, holds for any positive schedule and in every dimension.
+
+\subsection{One-dimensional basin exit and post-saddle passage}
+\label{sec:exit-times}
+
+Fix \(n\ge2\), \(\beta>0\), and \(d=1\). Consider three consecutive nondegenerate critical points of \(f\),
+\[
+    z_-<s<z_+,
+\]
+with \(z_\pm\) local minima and \(s\) the separating local maximum, and assume
+\begin{equation}
+    f'(x)>0\ \text{ on }(z_-,s),
+    \qquad
+    f'(x)<0\ \text{ on }(s,z_+).
+    \label{eq:adjacent-well-monotonicity}
+\end{equation}
+Set the relative energy and barrier heights
+\begin{equation}
+    r(x):=f(x)-f(z_-), \qquad h:=r(s)>0, \qquad \rho_+:=r(z_+)\ge0.
+    \label{eq:relative-energy}
+\end{equation}
+For an absolutely continuous path \(\boldsymbol\phi:[0,T]\to\R^n\), the Freidlin--Wentzell action for~\eqref{eq:sde} and the associated quasipotential to a closed set \(A\) are
+\begin{equation}
+    I_{0T}(\boldsymbol\phi) :=\frac14\int_0^T\bigl\|\dot{\boldsymbol\phi}+\nabla U_\beta(\boldsymbol\phi)\bigr\|^2\dd t,
+    \qquad
+    V_\beta(\xx,A):=\inf_{T>0}\ \inf_{\substack{\boldsymbol\phi(0)=\xx\\ \boldsymbol\phi(T)\in A}}I_{0T}(\boldsymbol\phi).
+    \label{eq:fw}
+\end{equation}
+Under the standard hypotheses of Freidlin--Wentzell exit theory~\cite{freidlin2012random}, the exit time \(\tau_D^\sigma\) from a metastable domain \(D\) satisfies \(\lim_{\sigma\downarrow0}\sigma\log\E_\xx\tau_D^\sigma=V_\beta(\xx,\partial D)\). For a gradient drift the action of any path splits as
+\begin{equation}
+    I_{0T}(\boldsymbol\phi)
+    =U_\beta(\boldsymbol\phi(T))-U_\beta(\boldsymbol\phi(0))
+    +\frac14\int_0^T\bigl\|\dot{\boldsymbol\phi}-\nabla U_\beta(\boldsymbol\phi)\bigr\|^2\dd t,
+    \label{eq:gradient-decomposition}
+\end{equation}
+so downhill segments (following the deterministic flow) cost nothing, while an uphill segment following the reversed flow costs exactly the potential increase.
+
+To build an admissible escape path, freeze \(n-1\) particles at \(z_-\) and let one particle move:
+\begin{equation}
+    \Gamma(x):=(x,z_-,\dots,z_-).
+    \label{eq:channel}
+\end{equation}
+Along this channel the joint potential depends on the active particle only through its relative energy, and equals (up to a constant) the \emph{reduced potential}
+\begin{equation}
+    u(r):=\frac{n\,r\,e^{-\beta r}}{\,n-1+e^{-\beta r}\,},\qquad r\ge0,
+    \label{eq:reduced-potential}
+\end{equation}
+Let \(r_c>0\) be the unique maximizer of \(u\) on \([0,\infty)\) (its existence and uniqueness are part of \ref{thm:transition-time}). We write the two relevant channel heights as \(u(r_c)=\max_{r\ge0}u(r)\) and \(\max_{0\le r\le h}u(r)=u(\min\{h,r_c\})\).
+
+\begin{theorem}[One-dimensional basin exit and post-saddle passage]
+\label{thm:transition-time}
+Under the assumptions~\eqref{eq:adjacent-well-monotonicity}--\eqref{eq:relative-energy} the following hold.
+\begin{enumerate}
+    \item \textbf{(Channel profile and barrier cap.)}
+    Along the frozen-background channel,
+    \[
+        U_\beta(\Gamma(x))-U_\beta(\Gamma(z_-))=u(r(x)).
+    \]
+    The reduced potential \(u\) is strictly increasing on \([0,r_c]\), strictly decreasing on \([r_c,\infty)\), and
+    \begin{equation}
+        \max_{r\ge0}u(r)=u(r_c)<\frac{n}{e(n-1)\beta}.
+        \label{eq:barrier-cap}
+    \end{equation}
+
+    \item \textbf{(Initial basin exit: quasipotential bound.)} The minimum action among channel paths joining \(\Gamma(z_-)\) to \(\Gamma(s)\) is \(u(\min\{h,r_c\})\). Consequently
+    \begin{equation}
+        V_\beta\bigl(\Gamma(z_-),\Gamma(s)\bigr)\le u(\min\{h,r_c\})<h .
+        \label{eq:initial-bound}
+    \end{equation}
+    This is a bound on the Freidlin--Wentzell quasipotential itself, established by exhibiting an admissible path; it does not yet assert anything about \(\E\tau^\sigma\).
+
+    \item \textbf{(Post-saddle well and passage.)}
+    Assume in addition
+    \begin{equation}
+        \rho_+<r_c<h .
+        \label{eq:high-barrier-regime}
+    \end{equation}
+    Then \(\Gamma(s)\) is a strict local minimum of \(U_\beta\). Let \(\xi_+\in(s,z_+)\) be the unique point with \(r(\xi_+)=r_c\). The minimum action among channel paths joining \(\Gamma(s)\) to \(\Gamma(\xi_+)\) equals \(u(r_c)-u(h)\), and therefore
+    \begin{equation}
+        V_\beta\bigl(\Gamma(s),\Gamma(\xi_+)\bigr)\le u(r_c)-u(h)<u(r_c).
+        \label{eq:post-saddle-bound}
+    \end{equation}
+    Beyond \(\xi_+\) the deterministic channel dynamics drive the active particle to \(z_+\).
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+See \ref{apx:technical-proofs}.
+\end{proof}
+
+\begin{corollary}[Exit-time consequence, conditional]
+\label{cor:exit-time-conditional}
+Suppose in addition that \(z_-\) admits a metastable domain \(D_-\subset\R^n\) for the flow \eqref{eq:sde}, in the sense that \(\Gamma(z_-)\) is the unique attractor of \(D_-\) for the noiseless flow \eqref{eq:gradient-flow} and the hypotheses of the Freidlin--Wentzell exit theorem~\cite{freidlin2012random} hold on \(D_-\), with \(\Gamma(\text{the }\min\{h,r_c\}\text{-level point on the channel})\in\partial D_-\) realizing the minimal quasipotential to \(\partial D_-\). Then
+\[
+    \lim_{\sigma\downarrow0}\sigma\log\E_{\Gamma(z_-)}\tau_{D_-}^\sigma
+    =V_\beta\bigl(\Gamma(z_-),\partial D_-\bigr)\le u(\min\{h,r_c\})<h .
+\]
+We do not construct \(D_-\) or verify these hypotheses here; \ref{thm:transition-time} supplies only the quasipotential bound~\eqref{eq:initial-bound}, which holds unconditionally.
+\end{corollary}
+
+\begin{remark}[Interpretation and scope]
+\label{rem:scope}
+Part~1 shows that, along this channel, an arbitrarily high physical barrier \(h\) is flattened to a level of order \(\beta^{-1}\): as \(h\) grows the active particle receives exponentially small Gibbs weight, so the barrier saturates rather than growing with \(h\). Part~2 gives a strict full-system \emph{upper} bound on the exit exponent through an explicit admissible path; because \(V_\beta\) is an infimum over all paths in \(\R^n\), the channel construction can only over-estimate it. Part~3 addresses the post-saddle obstruction: a high barrier may turn the physical maximum \(s\) into a Softmin-induced well, but its depth \(u(r_c)-u(h)\) is strictly below the initial barrier \(u(r_c)\), so it is not a worse obstruction than the one already crossed. The theorem does \emph{not} identify the exact transition exponent between the two basins, which would require ruling out returns to the initial basin and competing collective paths in \(\R^n\).
+\end{remark}
+
+\begin{remark}[Comparison with independent Langevin dynamics]
+\label{rem:comparison}
+For a single overdamped Langevin particle in the potential \(f\) started at \(z_-\), the classical small-noise exit exponent from the basin of \(z_-\) is the physical barrier \(h=f(s)-f(z_-)\)~\cite{freidlin2012random}. For \(n\) \emph{independent} copies, the first of the \(n\) exit times has the same exponential scale \(h\): taking a minimum over \(n\) i.i.d.\ variables with common exponential rate \(h/\sigma\) changes only the polynomial-in-\(n\) prefactor, not the exponent, as \(\sigma\downarrow0\).
+
+By~\eqref{eq:initial-bound}, the channel construction gives \(V_\beta(\Gamma(z_-),\Gamma(s))\le u(\min\{h,r_c\})<h\) for the joint Softmin diffusion. This is a comparison of an \emph{upper bound on a quasipotential} for the interacting system against the \emph{exact} exponent \(h\) of the noninteracting one; it shows the admissible channel is exponentially cheaper than independent escape, not that the true joint exit exponent is smaller. The stronger, exit-\emph{time} statement "the interaction cannot slow escape" holds only under the hypotheses of \ref{cor:exit-time-conditional}, which are not verified in this paper.
+\end{remark}
+
+\begin{remark}[Higher dimensions and annealing]
+\label{rem:higher-dim}
+The channel identity of Part~1 extends algebraically to \(d>1\): at a critical point \(s\) of \(f\) the active Hessian block is \(u'(h)\nabla^2 f(s)\), so if \(s\) is an index-one saddle and \(u'(h)<0\) the induced local minimum is a genuinely one-dimensional phenomenon, and transverse unstable directions may open cheaper escape routes. Regarding temperature, the fixed-\(\beta\) bound \eqref{eq:barrier-cap} decreases like \(\beta^{-1}\), favouring large \(\beta\) for barrier reduction; but large \(\beta\) also suppresses the drift of non-leading particles through their Gibbs weights. A decaying schedule \(\beta_t\) is therefore natural, and is used heuristically in the experiments; its rigorous large-deviation analysis is left open.
+\end{remark}
+
+\subsection{Descent of the ensemble minimum}
+\label{sec:convergence-rate}
+
+The instantaneous sign of \(a_k\) is not conserved for a fixed particle. The correct invariant object is the running best value
+\[
+    m(t):=\min_{1\le k\le n}f(x_k(t)),
+\]
+which we now control for a general, possibly time-dependent, schedule \(\beta_t>0\). Write \(a_k(t)\) for the coefficient~\eqref{eq:coefficient} evaluated at inverse temperature \(\beta_t\) and configuration \(\xx(t)\).
+
+\begin{theorem}[Descent of the ensemble minimum]
+\label{thm:ensemble-min}
+Let \(f\in C^1(\R^d)\) with locally Lipschitz gradient, let \(\beta_t>0\) be measurable, and let \(\xx(t)=(x_1(t),\dots,x_n(t))\) be a global solution of
+\[
+    \dot x_k(t)=-a_k(t)\,\nabla f(x_k(t)),\qquad k=1,\dots,n.
+\]
+Suppose \(f\) satisfies the Polyak--\L{}ojasiewicz inequality
+\[
+    \tfrac12\|\nabla f(x)\|^2\ge\mu\bigl(f(x)-f_\star\bigr),
+    \qquad f_\star:=\inf f,
+\]
+on the sublevel set \(S_0:=\{x:f(x)\le m(0)\}\), for some \(\mu>0\). Then \(m\) is nonincreasing and
+\[
+    m(t)-f_\star\le e^{-2\mu t}\bigl(m(0)-f_\star\bigr),\qquad t\ge0.
+\]
+\end{theorem}
+
+\begin{proof}
+See \ref{apx:technical-proofs}.
+\end{proof}
+
+The estimate compares the best value in the ensemble against ordinary gradient flow; it does not assign a permanent role to any designated particle, and it does not compare deterministic descent with noisy Langevin dynamics.
+
+\begin{remark}[Global existence]
+\label{rem:global-existence}
+\ref{thm:ensemble-min} presupposes a global solution. Since \(m\) is nonincreasing, every particle attaining the running minimum stays in the compact sublevel set \(S_0\) when \(f\) is coercive; the theorem controls these particles only. Ascending particles (\(a_k<0\)) are damped by an exponentially small Gibbs weight, but their trajectories are not controlled by this estimate and global existence must be assumed or established separately.
+\end{remark}
+
+\section{Numerical experiments}
+\label{sec:numerical-experiments}
+
+\textcolor{blue}{This section is a placeholder for the major revision. The experiments must (i) use an asymmetric one-dimensional double well to genuinely test escape from a suboptimal basin; (ii) report cost-matched comparisons under common objective- and gradient-evaluation budgets rather than per-iteration counts; and (iii) include a mechanism ablation replacing \(a_k\) by \((a_k)_+\) and \(|a_k|\), together with the time-dependent proportions of particles in the regimes \(a_k<0\), \(0\le a_k<1\), \(a_k\ge1\).}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\newpage
+\appendix
+\onecolumn
+\section{Technical proofs}
+\label{apx:technical-proofs}
+
+\subsection{Differential identities}
+
+\begin{lemma}[Component gradient and Hessian at critical configurations]
+\label{lem:gradient-hessian}
+Let \(U_\beta=nJ_\beta\) with \(J_\beta\) as in~\eqref{eq:softmin-energy}, and let \(a_k\) be as in~\eqref{eq:coefficient}. Then
+\begin{equation}
+    \nabla_{x_k}U_\beta(\xx)=a_k(\xx)\nabla f(x_k),
+    \qquad
+    \sum_{k=1}^n a_k(\xx)=n .
+    \label{eq:lemma-gradient}
+\end{equation}
+Moreover, for \(k\ne\ell\) the mixed Hessian block is the outer product
+\begin{equation}
+    \nabla^2_{x_\ell x_k}U_\beta(\xx)
+    =\nabla f(x_k)\,\bigl(\nabla_{x_\ell}a_k(\xx)\bigr)^\top ,
+    \label{eq:mixed-block}
+\end{equation}
+which vanishes whenever \(\nabla f(x_k)=0\). Consequently, if \(\xx\) is such that \(\nabla f(x_k)=0\) for all \(k\), then \(\nabla U_\beta(\xx)=0\) and the Hessian is block diagonal,
+\begin{equation}
+    \nabla^2 U_\beta(\xx)
+    =\operatorname{blockdiag}\bigl(a_1(\xx)\nabla^2 f(x_1),\dots,a_n(\xx)\nabla^2 f(x_n)\bigr).
+    \label{eq:block-diagonal-hessian}
+\end{equation}
+Finally, if \(a_k(\xx)=0\) then \(\nabla^2_{x_kx_k}U_\beta(\xx)=-n\beta w_k(\xx)\nabla f(x_k)\nabla f(x_k)^\top\).
+\end{lemma}
+
+\begin{proof}
+Differentiating a single Gibbs weight gives \(\nabla_{x_k}w_i=\beta w_iw_k\nabla f(x_k)\) for \(i\ne k\) and \(\nabla_{x_k}w_k=-\beta w_k(1-w_k)\nabla f(x_k)\). Hence, with \(J_\beta=\sum_i w_if(x_i)\),
+\begin{align*}
+    \nabla_{x_k}J_\beta & =\sum_{i\ne k}\beta w_iw_kf(x_i)\nabla f(x_k) -\beta w_k(1-w_k)f(x_k)\nabla f(x_k)+w_k\nabla f(x_k)\\
+   & =w_k\bigl[1-\beta(f(x_k)-J_\beta)\bigr]\nabla f(x_k),
+\end{align*}
+and multiplying by \(n\) yields the first identity in~\eqref{eq:lemma-gradient}. Summing~\eqref{eq:coefficient} and using \(\sum_k w_k=1\), \(\sum_k w_kf(x_k)=J_\beta\) gives \(\sum_k a_k=n\).
+
+Differentiating \(\nabla_{x_k}U_\beta=a_k\nabla f(x_k)\) with respect to \(x_\ell\), and using that \(\nabla f(x_k)\) is independent of \(x_\ell\) for \(\ell\ne k\), produces~\eqref{eq:mixed-block}; the factor \(\nabla f(x_k)\) makes the block vanish when \(x_k\) is critical. If \(\nabla f(x_k)=0\) for all \(k\), then~\eqref{eq:lemma-gradient} gives \(\nabla U_\beta(\xx)=0\), every mixed block vanishes, and the diagonal block reduces to \(\nabla^2_{x_kx_k}U_\beta=a_k\nabla^2 f(x_k)+\nabla f(x_k)(\nabla_{x_k}a_k)^\top =a_k\nabla^2 f(x_k)\), which is~\eqref{eq:block-diagonal-hessian}.
+
+For the last identity, write \(q_k:=1-\beta(f(x_k)-J_\beta)\), so \(a_k=nw_kq_k\). Using \(\nabla_{x_k}J_\beta=(a_k/n)\nabla f(x_k)\) one computes \(\nabla_{x_k}q_k=-\beta(1-a_k/n)\nabla f(x_k)\) and \(\nabla_{x_k}(nw_k)=-n\beta w_k(1-w_k)\nabla f(x_k)\); hence \(\nabla_{x_k}a_k=-\beta\bigl[nw_k(1-w_k)q_k+nw_k(1-a_k/n)\bigr]\nabla f(x_k)\). When \(a_k=0\) we have \(q_k=0\), so this reduces to \(\nabla_{x_k}a_k=-n\beta w_k\nabla f(x_k)\), and substituting into \(\nabla^2_{x_kx_k}U_\beta=a_k\nabla^2 f(x_k)+\nabla f(x_k)(\nabla_{x_k}a_k)^\top\) gives the stated formula.
+\end{proof}
+
+\subsection{Proof of \texorpdfstring{\ref{thm:stable-stationary-points}}{Theorem 2.1}}
+
+\begin{proof}
+A locally asymptotically stable equilibrium of a gradient flow \(\dot\xx=-\nabla U_\beta(\xx)\) is an \emph{isolated local minimum} of \(U_\beta\). Indeed \(\tfrac{\dd}{\dd t}U_\beta(\xx(t))=-\|\nabla U_\beta\|^2\le0\), so if points arbitrarily close to \(\bar\xx\) had strictly smaller potential their trajectories could not converge to \(\bar\xx\); and a non-isolated equilibrium admits nearby constant trajectories that do not converge to \(\bar\xx\).
+
+Fix \(k\) and freeze the other particles at \(\bar x_j\), \(j\ne k\). Since \(U_\beta\) depends on \(x_k\) only through \(r=f(x_k)\), we may write
+\[
+    U_\beta(\bar x_1,\dots,x_k,\dots,\bar x_n)=g(f(x_k)),
+    \qquad
+    g(r):=n\,\frac{r e^{-\beta r}+C_1}{e^{-\beta r}+C_0},
+\]
+with \(C_0:=\sum_{j\ne k}e^{-\beta f(\bar x_j)}>0\) and \(C_1:=\sum_{j\ne k}f(\bar x_j)e^{-\beta f(\bar x_j)}\). By the chain rule and \eqref{eq:lemma-gradient}, wherever \(\nabla f(x_k)\ne0\) one has \(g'(f(x_k))=a_k\); by continuity of both sides in \(f(x_k)\),
+\begin{equation}
+    g'\bigl(f(\bar x_k)\bigr)=a_k(\bar\xx).
+    \label{eq:g-prime}
+\end{equation}
+Writing \(g'(r)=n\,\omega(r)\,\bigl[1-\beta(r-g(r)/n)\bigr]\) with \(\omega(r)=e^{-\beta r}/(e^{-\beta r}+C_0)\in(0,1)\), a direct computation shows that at any critical point \(r_0\) of \(g\) (where the bracket vanishes),
+\begin{equation}
+    g''(r_0)=-n\beta\,\omega(r_0)<0 .
+    \label{eq:g-second}
+\end{equation}
+
+\emph{Step 1: \(a_k(\bar\xx)\ne0\).}
+Suppose \(a_k(\bar\xx)=0\). By~\eqref{eq:g-prime}, \(r_0=f(\bar x_k)\) is a critical point of \(g\), and by~\eqref{eq:g-second} it is a strict local maximum. If \(f\) is non-constant near \(\bar x_k\), there are points \(y\) arbitrarily close to \(\bar x_k\) with \(f(y)\) close to but different from \(r_0\), whence \(U_\beta(\dots,y,\dots)=g(f(y))<g(r_0)=U_\beta(\bar\xx)\), contradicting local minimality. If \(f\) is constant near \(\bar x_k\), then moving \(x_k\) within that level set leaves all objective values, Gibbs weights and gradients unchanged, producing a continuum of equilibria arbitrarily close to \(\bar\xx\) and contradicting isolation. Hence \(a_k(\bar\xx)\ne0\).
+
+\emph{Step 2: \(\nabla f(\bar x_k)=0\).}
+Since \(a_k(\bar\xx)\ne0\), \eqref{eq:g-prime} gives \(g'(f(\bar x_k))\ne0\), so \(g\) is strictly monotone near \(f(\bar x_k)\). If \(\nabla f(\bar x_k)\ne0\), then \(f\) takes values on both sides of \(f(\bar x_k)\) arbitrarily near \(\bar x_k\); strict monotonicity of \(g\) then yields nearby configurations with \(U_\beta<U_\beta(\bar\xx)\), contradicting local minimality. Hence \(\nabla f(\bar x_k)=0\).
+
+\emph{Step 3: classification.}
+If \(a_k(\bar\xx)>0\), then \(g\) is strictly increasing near \(f(\bar x_k)\), so local minimality of \(U_\beta\) forces \(f(x_k)\ge f(\bar x_k)\) for \(x_k\) near \(\bar x_k\); thus \(\bar x_k\) is a local minimum of \(f\). If \(a_k(\bar\xx)<0\), the symmetric argument shows \(\bar x_k\) is a local maximum. Because \(nw_k>0\), the sign of \(a_k\) is that of \(1-\beta(f(\bar x_k)-J_\beta(\bar\xx))\), giving the stated threshold. Finally, \eqref{eq:sum-a} forces some \(a_k(\bar\xx)>0\), so at least one particle is at a local minimum of \(f\).
+\end{proof}
+
+\subsection{Proof of \texorpdfstring{\ref{thm:transition-time}}{Theorem 3.1}}
+
+\begin{proof}
+\emph{Part 1.}
+Factoring \(e^{-\beta f(z_-)}\) from the Gibbs weights,
+\[
+    J_\beta(\Gamma(x)) =f(z_-)+\frac{r(x)e^{-\beta r(x)}}{n-1+e^{-\beta r(x)}},
+\]
+and multiplying by \(n\) gives
+\(U_\beta(\Gamma(x))-U_\beta(\Gamma(z_-))=u(r(x))\). Differentiating,
+\[
+    u'(r)=\frac{ne^{-\beta r}\,q(r)}{(n-1+e^{-\beta r})^2},
+    \qquad
+    q(r):=(n-1)(1-\beta r)+e^{-\beta r}.
+\]
+Since \(q'(r)=-\beta(n-1)-\beta e^{-\beta r}<0\), \(q(0)=n>0\) and \(q(r)\to-\infty\), \(q\) has a unique zero \(r_c>0\); thus \(u\) increases on \([0,r_c]\) and decreases on \([r_c,\infty)\). From \(u(r)<\tfrac{n}{n-1}re^{-\beta r}\) and \(\max_{r\ge0}re^{-\beta r}=1/(e\beta)\) we get \(u(r_c)<n/(e(n-1)\beta)\), proving~\eqref{eq:barrier-cap}.
+
+\emph{Part 2.}
+A channel path has the form \(\boldsymbol\phi(t)=\Gamma(\psi(t))\); the frozen coordinates stay at the critical point \(z_-\), so their drift vanishes and, with \(W(x):=u(r(x))\), the action reduces to \(I_{0T}=\tfrac14\int_0^T|\dot\psi+W'(\psi)|^2\,\dd t\). The one-dimensional version of~\eqref{eq:gradient-decomposition} is
+\[
+    I_{0T}=W(\psi(T))-W(\psi(0))+\tfrac14\int_0^T|\dot\psi-W'(\psi)|^2\,\dd t .
+\]
+Let \(x_m\in(z_-,s]\) be the unique point with \(r(x_m)=\min\{h,r_c\}\), which exists because \(r\) is strictly increasing on \((z_-,s)\) by~\eqref{eq:adjacent-well-monotonicity}. Every continuous channel path from \(z_-\) to \(s\) passes through \(x_m\), which realizes the largest value of \(u\) attained for \(0\le r\le h\); hence the action is at least \(W(x_m)-W(z_-)=u(\min\{h,r_c\})\). This value is attained in the quasipotential sense by following the reversed deterministic flow from \(z_-\) up to \(x_m\) (cost exactly \(u(\min\{h,r_c\})\)) and then the forward flow toward \(s\) at zero additional cost, with standard finite-time approximations near the critical points. Therefore the channel quasipotential equals \(u(\min\{h,r_c\})\), and since \(V_\beta\) is an infimum over the larger class of all paths in \(\R^n\),
+\[
+    V_\beta\bigl(\Gamma(z_-),\Gamma(s)\bigr)\le u(\min\{h,r_c\}).
+\]
+Because \(u(r)/r=ne^{-\beta r}/(n-1+e^{-\beta r})<1\) for \(r>0\), we have \(u(\min\{h,r_c\})<\min\{h,r_c\}\le h\), which gives~\eqref{eq:initial-bound}. The exit-time statement then follows from the Freidlin--Wentzell exit theorem whenever its hypotheses hold for \(D_-\).
+
+\emph{Part 3.}
+Assume \(\rho_+<r_c<h\). At \(\mathbf s:=\Gamma(s)\) every particle is at a critical point of \(f\) (either \(s\) or \(z_-\)), so by \ref{lem:gradient-hessian} the Hessian of \(U_\beta\) is block diagonal with blocks \(a_k(\mathbf s)f''(\cdot)\). For the active particle, \(a_1(\mathbf s)f''(s)=u'(h)f''(s)\); since \(h>r_c\) gives \(u'(h)<0\) and \(f''(s)<0\) (nondegenerate maximum), this block is positive. For a frozen particle at \(z_-\), \(a_j(\mathbf s)=nw_j(\mathbf s)[1+\beta(J_\beta(\mathbf s)-f(z_-))]>0\) because \(J_\beta(\mathbf s)>f(z_-)\), and \(f''(z_-)>0\); so these blocks are positive too. Hence \(\nabla^2 U_\beta(\mathbf s)\succ0\) and \(\mathbf s\) is a strict local minimum.
+
+On \((s,z_+)\), \(r\) decreases strictly from \(h\) to \(\rho_+\), so there is a unique \(\xi_+\) with \(r(\xi_+)=r_c\). Between \(s\) and \(\xi_+\) the reduced potential rises from \(u(h)\) to \(u(r_c)\); the gradient-action argument of Part~2 gives channel action \(u(r_c)-u(h)\), and since \(0<u(h)<u(r_c)\) we obtain~\eqref{eq:post-saddle-bound}. Finally, for \(x\in(\xi_+,z_+)\) we have \(r(x)<r_c\), hence \(u'(r(x))>0\), while \(f'(x)<0\); therefore the active coordinate of the deterministic channel flow satisfies \(\dot x=-u'(r(x))f'(x)>0\), driving the particle toward \(z_+\).
+\end{proof}
+
+\subsection{Proof of \texorpdfstring{\ref{thm:ensemble-min}}{Theorem 3.2}}
+
+\begin{proof}
+Fix \(t\) and let \(i\) attain the minimum, \(f(x_i(t))=m(t)\). Since \(f(x_i(t))\le f(x_j(t))\) for all \(j\), we have \(e^{-\beta_t f(x_j(t))}\le e^{-\beta_t f(x_i(t))}\), hence \(\sum_j e^{-\beta_t f(x_j(t))}\le n\,e^{-\beta_t f(x_i(t))}\) and therefore \(nw_i(t)\ge1\). As \(J_{\beta_t}(\xx(t))\) is a convex combination of the values \(f(x_j(t))\), it satisfies \(J_{\beta_t}(\xx(t))\ge f(x_i(t))\), so \(1-\beta_t(f(x_i(t))-J_{\beta_t}(\xx(t)))\ge1\). Multiplying,
+\begin{equation}
+    a_i(t)\ge1\qquad\text{for every }i\text{ attaining the minimum at }t .
+    \label{eq:ai-ge-1}
+\end{equation}
+Along such a particle,
+\[
+    \frac{\dd}{\dd t}f(x_i(t))
+    =\langle\nabla f(x_i(t)),\dot x_i(t)\rangle
+    =-a_i(t)\|\nabla f(x_i(t))\|^2
+    \le-\|\nabla f(x_i(t))\|^2 .
+\]
+
+The map \(m=\min_k g_k\), with \(g_k(t)=f(x_k(t))\in C^1\), is locally Lipschitz, hence absolutely continuous and differentiable for a.e.\ \(t\). At a differentiability point \(t\), choose \(i\) attaining the minimum; the differentiable function \(g_i-m\ge0\) vanishes at \(t\) and thus has zero derivative there, giving \(m'(t)=g_i'(t)\). Combined with the previous display,
+\[
+    m'(t)=-a_i(t)\|\nabla f(x_i(t))\|^2\le-\|\nabla f(x_i(t))\|^2\le0
+    \qquad\text{for a.e. }t .
+\]
+Integrating, \(m\) is nonincreasing, so every minimizing particle stays in \(S_0=\{f\le m(0)\}\), where the Polyak--\L{}ojasiewicz inequality applies:
+\[
+    m'(t)\le-\|\nabla f(x_i(t))\|^2\le-2\mu\bigl(f(x_i(t))-f_\star\bigr)
+    =-2\mu\bigl(m(t)-f_\star\bigr).
+\]
+Setting \(y(t):=e^{2\mu t}(m(t)-f_\star)\), which is absolutely continuous, we get \(y'(t)=e^{2\mu t}[m'(t)+2\mu(m(t)-f_\star)]\le0\) for a.e.\ \(t\), so \(y(t)\le y(0)\), i.e.
+\[
+    m(t)-f_\star\le e^{-2\mu t}\bigl(m(0)-f_\star\bigr),\qquad t\ge0 . \qedhere
+\]
+\end{proof}
+
+\end{document}
