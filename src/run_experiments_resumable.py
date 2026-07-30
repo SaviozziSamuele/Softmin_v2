@@ -14,14 +14,25 @@ from simulations import (
     SimulatedAnnealing,
     GradientAwareCBO,
     GradientAwarePSO,
+    CBO,
+    PSO,
 )
 
 job_id = os.environ.get("SLURM_JOB_ID", "local")
 RESULTS_CSV = f'results/master_experiment_log_decay_{job_id}.csv'
 MAX_STEPS = 2_000_000_000
 
-# experiment, parameter, seed, softmin, softmin_decay, sa, cbo, pso
-HEADER = ['experiment', 'parameter', 'seed', 'softmin', 'softmin_decay', 'sa', 'cbo', 'pso']
+# Standard CBO's inverse temperature is annealed *upward* in the literature (opposite direction
+# from Softmin's decaying beta) -- see GradientAwareCBO's beta_growth / CBO's beta_growth.
+CBO_BETA_GROWTH = 1.001
+
+# experiment, parameter, seed, softmin, softmin_decay, sa, cbo, cbo_annealed, pso,
+# standard_cbo, standard_pso
+HEADER = [
+    'experiment', 'parameter', 'seed',
+    'softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+    'standard_cbo', 'standard_pso',
+]
 
 
 def worker_task(args):
@@ -80,8 +91,22 @@ def worker_task(args):
         bounds=bounds, learning_rate=lr, consensus_rate=1.0,
         noise_intensity=np.sqrt(2 * noise_val), beta=10.0
     )
+    cbo_annealed = GradientAwareCBO(
+        n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
+        bounds=bounds, learning_rate=lr, consensus_rate=1.0,
+        noise_intensity=np.sqrt(2 * noise_val), beta=10.0, beta_growth=CBO_BETA_GROWTH
+    )
 
     pso = GradientAwarePSO(
+        n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
+        bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
+    )
+
+    standard_cbo = CBO(
+        n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
+        bounds=bounds, learning_rate=lr, consensus_rate=1.0, noise_intensity=1.0, beta=10.0
+    )
+    standard_pso = PSO(
         n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
         bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
     )
@@ -92,15 +117,22 @@ def worker_task(args):
         softmin_decay.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
         sa.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
         cbo.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
+        cbo_annealed.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
         pso.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
+        standard_cbo.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
+        standard_pso.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
 
     # 3. Compute Entry/Exit Times
     t_softmin = softmin.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_softmin_decay = softmin_decay.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_sa = sa.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_cbo = cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    t_cbo_annealed = cbo_annealed.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_pso = pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    return exp_name, param, seed, t_softmin, t_softmin_decay, t_sa, t_cbo, t_pso
+    t_standard_cbo = standard_cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    t_standard_pso = standard_pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    return (exp_name, param, seed, t_softmin, t_softmin_decay, t_sa, t_cbo, t_cbo_annealed,
+            t_pso, t_standard_cbo, t_standard_pso)
 
 
 def task_key(t):
@@ -145,6 +177,7 @@ if __name__ == '__main__':
         results_csv=RESULTS_CSV,
         key_indices=[0, 1],       # experiment, parameter
         value_start=3,            # skip seed (index 2); values start at softmin
-        algo_names=['softmin', 'softmin_decay', 'sa', 'cbo', 'pso'],
+        algo_names=['softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+                     'standard_cbo', 'standard_pso'],
         filename_fn=filename_for,
     )

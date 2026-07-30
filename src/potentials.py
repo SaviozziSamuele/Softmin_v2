@@ -45,6 +45,62 @@ def one_dimensional_double_well(delta):
     }
 
 
+def asymmetric_double_well(delta, tilt):
+    """1D double well with a linear tilt term breaking left/right symmetry, so the two minima
+    have genuinely different depths. Needed to test escape from a suboptimal basin (the
+    symmetric `one_dimensional_double_well` has two equally-good minima, so there is no
+    suboptimal basin to escape from) — see Theorem 3.1 in `paper/SoftMin_revised_theory.tex`,
+    which analyzes escape from a starting basin `z_-` into an adjacent basin `z_+` with relative
+    height rho_+ = f(z_+) - f(z_-) >= 0.
+    """
+    x = symbols('x')
+    f = x**4 - delta * x**2 + tilt * x
+    df = diff(f, x)
+
+    # f'(x) = 4x^3 - 2*delta*x + tilt; the tilt term breaks the closed-form factorization
+    # `one_dimensional_double_well` relies on (roots 0, +-sqrt(delta/2)), so this needs the
+    # general cubic solver -- still handled numerically by polyroots.
+    roots = P.polyroots([tilt, -2 * delta, 0, 4])
+    real_roots = np.sort(roots[np.abs(roots.imag) < 1e-8].real)
+    if len(real_roots) != 3:
+        raise ValueError(
+            f"asymmetric_double_well(delta={delta}, tilt={tilt}) does not have 3 real critical "
+            f"points (found {len(real_roots)}); reduce |tilt| relative to delta."
+        )
+    left, saddle, right = real_roots
+
+    f_num = lambdify(x, f, modules='numpy')
+    df_num = lambdify(x, df, modules='numpy')
+
+    def well(x):
+        return f_num(x)
+
+    def well_grad(x):
+        return df_num(x)
+
+    well_vec = np.vectorize(well, signature='(n)->()')
+    well_grad_vec = np.vectorize(well_grad, signature='(n)->(n)')
+
+    # The suboptimal (shallower) well is the escape-test starting point z_-; the deeper well is
+    # the escape target z_+, regardless of which side of the saddle each one falls on.
+    if well(np.array([left])) >= well(np.array([right])):
+        z_start, z_target = left, right
+    else:
+        z_start, z_target = right, left
+
+    return {
+        'f_vec': well_vec,
+        'f_grad_vec': well_grad_vec,
+        'particle_init': [[z_start - 0.2, z_start + 0.2]],
+        'set': [[z_target - 0.2, z_target + 0.2]],
+        'bounds': [[left - 0.5, right + 0.5]],
+        'critical_points': [left, saddle, right],
+        'z_start': z_start,
+        'saddle': saddle,
+        'z_target': z_target,
+    }
+
+
 def unbalanced_quadruple_well_setting(A, delta):
     x, y = symbols('x y')
     f = x**4 + y**4 - A*(x**2 + y**2) - delta*x*y

@@ -3,12 +3,18 @@ import os
 import numpy as np
 
 from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv
-from potentials import one_dimensional_double_well
+from potentials import asymmetric_double_well
 from simulations import SoftminEnergyAdagrad
 
 job_id = os.environ.get("SLURM_JOB_ID", "local")
 RESULTS_CSV = f'results/master_theory_verification_init0_0p05_{job_id}.csv'
 MAX_STEPS = 10_000_000
+
+# Fixed asymmetry for the well: small enough to keep 3 real critical points across the whole
+# delta sweep below (see src/potentials.py:asymmetric_double_well), while still making the two
+# minima genuinely different depths so this tests escape from a suboptimal basin, not just a
+# symmetric barrier crossing.
+TILT = 0.05
 
 HEADER = ['experiment', 'parameter', 'noise', 'seed', 'softmin_static']
 
@@ -20,9 +26,9 @@ def worker_task(args):
     experiment, param, noise_val, seed = args
     np.random.seed(seed * 1000)
 
-    setting = one_dimensional_double_well(param)  # param is delta
+    setting = asymmetric_double_well(param, TILT)  # param is delta
     d = 1
-    particle_init = [[setting['critical_points'][0], setting['critical_points'][0]]]
+    particle_init = [[setting['z_start'], setting['z_start']]]
 
     f_vec = setting['f_vec']
     f_grad_vec = setting['f_grad_vec']

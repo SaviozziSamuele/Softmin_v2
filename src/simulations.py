@@ -1,16 +1,19 @@
 """Vectorized particle-swarm simulation classes.
 
-Base class `Simulation` plus five concrete dynamics:
+Base class `Simulation` plus seven concrete dynamics:
     SoftminEnergyAdagrad  - this paper's method (Softmin Energy coupling + Adagrad)
     GaussianDiffusion     - overdamped Langevin dynamics (baseline)
     SimulatedAnnealing    - Langevin dynamics with a temperature-cooling schedule (baseline)
     GradientAwareCBO      - Gradient-Aware Consensus-Based Optimization (baseline)
     GradientAwarePSO      - Gradient-Enhanced Particle Swarm Optimization (baseline)
+    CBO                   - canonical, gradient-free Consensus-Based Optimization (baseline)
+    PSO                   - canonical, gradient-free Particle Swarm Optimization (baseline)
 """
 import logging
 import multiprocessing as mp
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, List, Literal, Optional, Union
 
 import numpy as np
 
@@ -106,7 +109,29 @@ class Simulation(ABC):
         self.noise = None
         self.history_eq_values = None
 
+        # Computational-cost instrumentation: evaluation counts (the fair cost currency across
+        # gradient-based and gradient-free methods, per the paper's cost-matched-comparison
+        # requirement) plus a secondary, implementation-level wall-clock signal. Only step()-time
+        # calls are counted, not the one-off vectorization check above or reset()'s initial
+        # evaluation, since those are a fixed, identical overhead across all methods.
+        self.n_gradient_evals = 0
+        self.n_objective_evals = 0
+        self.wall_clock_seconds = 0.0
+
         logger.info(f"Initialized Simulation '{self.name}' with {self.n} particles in {self.d}D space.")
+
+    def _eval_grad(self, positions: np.ndarray) -> np.ndarray:
+        """Evaluates df(positions) and counts the call. Subclasses should call this instead of
+        `self.df(...)` directly from within `step()`, so gradient-free methods (which never call
+        it) naturally report zero gradient evaluations."""
+        self.n_gradient_evals += 1
+        return self.df(positions)
+
+    def _eval_obj(self, positions: np.ndarray) -> np.ndarray:
+        """Evaluates f(positions) and counts the call. Subclasses should call this instead of
+        `self.f(...)` directly from within `step()`."""
+        self.n_objective_evals += 1
+        return self.f(positions)
 
     @abstractmethod
     def step(self) -> None:
@@ -116,10 +141,12 @@ class Simulation(ABC):
     def run(self, n_steps: int) -> None:
         """Executes the simulation loop."""
         logger.info(f"Running simulation for {n_steps} steps...")
+        start_time = time.perf_counter()
         for i in range(n_steps):
             self.n_steps = i + 1
             self.step()
             self.history.append(self.particles.copy())
+        self.wall_clock_seconds += time.perf_counter() - start_time
         logger.info("Simulation completed.")
 
     def first_entry_time(self, target_set: List[List[float]], max_steps: int = 10_000) -> float:
@@ -133,6 +160,7 @@ class Simulation(ABC):
         lower_bounds = np.array([s[0] for s in target_set])
         upper_bounds = np.array([s[1] for s in target_set])
 
+        start_time = time.perf_counter()
         for i in range(max_steps):
             self.step()
             # Vectorized logical AND across all bounds, then checking if ANY particle satisfies ALL dimension bounds
@@ -140,13 +168,16 @@ class Simulation(ABC):
 
             if np.any(in_bounds):
                 logger.info(f"Entry set reached at step {i}.")
+                self.wall_clock_seconds += time.perf_counter() - start_time
                 return i * self.learning_rate
             if i % 1000 == 0:
                 # If the max standard deviation across all spatial dimensions is functionally zero
                 if np.max(np.std(self.particles, axis=0)) < 1e-6:
                     # The swarm is permanently trapped. Abort the simulation to save CPU time.
+                    self.wall_clock_seconds += time.perf_counter() - start_time
                     return max_steps * self.learning_rate
 
+        self.wall_clock_seconds += time.perf_counter() - start_time
         logger.warning(f"Maximum steps ({max_steps}) reached without entering target set.")
         return max_steps * self.learning_rate
 
@@ -200,7 +231,9 @@ class SoftminEnergyAdagrad(Simulation):
         noise_intensity: float = 0.2,
         beta_decay: Optional[float] = None,
         noise: Optional[str] = "normal",
-        adaptive_lr: bool = True
+        adaptive_lr: bool = True,
+        track_prefactor_history: bool = False,
+        prefactor_mode: Literal["signed", "positive_part", "absolute"] = "signed"
     ):
         # Resolve mutable defaults safely
         if bounds is None:
@@ -231,6 +264,16 @@ class SoftminEnergyAdagrad(Simulation):
         self.adaptive_lr = adaptive_lr
         self.alpha = initial_lr
         self.G = np.zeros_like(self.particles)
+
+        if prefactor_mode not in ("signed", "positive_part", "absolute"):
+            raise ValueError("prefactor_mode must be 'signed', 'positive_part', or 'absolute'.")
+        self.prefactor_mode = prefactor_mode
+
+        # Opt-in per-particle prefactor (A_{t,k}) history, for the ascent-descent diagnostic
+        # plot. Left off by default: production sweeps run up to MAX_STEPS = 2e9 steps, and
+        # storing a full per-step, per-particle history at that scale would be catastrophic.
+        self.track_prefactor_history = track_prefactor_history
+        self.prefactor_history = [] if track_prefactor_history else None
 
         # Initialize energy metrics safely
         initial_energy = self._compute_softmin_energy(self.values)
@@ -280,7 +323,7 @@ class SoftminEnergyAdagrad(Simulation):
 
     def step(self) -> None:
         """Performs a single vectorized simulation update."""
-        gradient = self.df(self.particles)
+        gradient = self._eval_grad(self.particles)
         energy = self.Js[-1]
 
         # Compute stabilized weights
@@ -288,8 +331,26 @@ class SoftminEnergyAdagrad(Simulation):
 
         # Vectorized velocity computation
         # weights * self.n replaces (n * exponentials / sum(exponentials))
+        # velocity_scale = n * A_{t,k} (the paper's per-particle effective learning rate)
         velocity_scale = (1.0 - self.beta * (self.values - energy)) * (self.n * weights)
-        velocities = velocity_scale[:, np.newaxis] * gradient
+
+        if self.track_prefactor_history:
+            self.prefactor_history.append(velocity_scale / self.n)
+
+        # Mechanism ablation: which transform of the raw signed prefactor actually drives the
+        # particles. "signed" is the paper's mechanism (ascending particles reverse direction);
+        # "positive_part" freezes ascending particles instead of letting them climb; "absolute"
+        # forces every particle to always descend, scaled by the prefactor's magnitude. Only the
+        # applied drift changes -- the Softmin energy bookkeeping above always uses the true
+        # signed values, so diagnostics stay meaningful across all three variants.
+        if self.prefactor_mode == "signed":
+            applied_scale = velocity_scale
+        elif self.prefactor_mode == "positive_part":
+            applied_scale = np.maximum(velocity_scale, 0.0)
+        else:  # "absolute"
+            applied_scale = np.abs(velocity_scale)
+
+        velocities = applied_scale[:, np.newaxis] * gradient
 
         if self.adaptive_lr:
             self.alpha = self.lr_schedule(gradient)
@@ -306,7 +367,7 @@ class SoftminEnergyAdagrad(Simulation):
         self.particles = np.clip(self.particles, lower_bounds, upper_bounds)
 
         # Single function evaluation per step
-        self.values = self.f(self.particles)
+        self.values = self._eval_obj(self.particles)
 
         # Update metrics
         new_energy = self._compute_softmin_energy(self.values)
@@ -344,6 +405,7 @@ class SoftminEnergyAdagrad(Simulation):
         initial_energy = self._compute_softmin_energy(self.best_values)
         self.Js = [initial_energy]
         self.history_eq_values = [1.0 / self.beta + initial_energy]
+        self.prefactor_history = [] if self.track_prefactor_history else None
 
 
 class GaussianDiffusion(Simulation):
@@ -391,7 +453,7 @@ class GaussianDiffusion(Simulation):
 
     def step(self) -> None:
         """Executes a single vectorized Euler-Maruyama integration step."""
-        gradient = self.df(self.particles)
+        gradient = self._eval_grad(self.particles)
 
         # Generate the Wiener process increment
         stochastic_term = self._noise_scale * np.random.normal(
@@ -407,7 +469,7 @@ class GaussianDiffusion(Simulation):
         self.particles = np.clip(self.particles, self._lower_bounds, self._upper_bounds)
 
         # Evaluate objective function
-        self.values = self.f(self.particles)
+        self.values = self._eval_obj(self.particles)
 
         # Update local bests for each particle
         improved = self.values < self.best_values
@@ -511,7 +573,7 @@ class SimulatedAnnealing(Simulation):
 
     def step(self) -> None:
         """Executes a single step of Langevin dynamics with stable annealing."""
-        gradient = self.df(self.particles)
+        gradient = self._eval_grad(self.particles)
         current_temp = self.temperature()
 
         # Standard unscaled gradient step: eta * grad(f)
@@ -533,7 +595,7 @@ class SimulatedAnnealing(Simulation):
         self.particles = np.clip(self.particles, self._lower_bounds, self._upper_bounds)
 
         # Single evaluation per step
-        self.values = self.f(self.particles)
+        self.values = self._eval_obj(self.particles)
 
         # Local best memory updates
         improved = self.values < self.best_values
@@ -565,6 +627,7 @@ class GradientAwareCBO(Simulation):
         consensus_rate: float = 1.0,         # lambda: Attraction pull to the consensus
         noise_intensity: float = np.sqrt(2), # sigma: Diffusion scaling
         beta: float = 10.0,                  # beta: Temperature inverse for consensus
+        beta_growth: Optional[float] = None, # optional annealing: beta *= beta_growth each step
         name: str = "GradientAwareCBO"
     ):
         if bounds is None:
@@ -583,10 +646,14 @@ class GradientAwareCBO(Simulation):
 
         if consensus_rate < 0 or noise_intensity < 0 or beta <= 0:
             raise ValueError("Consensus rate, noise intensity, and beta must be strictly positive.")
+        if beta_growth is not None and beta_growth <= 1:
+            raise ValueError("beta_growth must be > 1 (CBO's temperature is annealed upward, "
+                              "the opposite direction from Softmin's decaying beta).")
 
         self.consensus_rate = consensus_rate
         self.noise_intensity = noise_intensity
         self.beta = float(beta)
+        self.beta_growth = beta_growth
 
         # PRE-ALLOCATION: Cache bounds and compute static scalars
         self._lower_bounds = np.array([b[0] for b in self.bounds])
@@ -612,7 +679,7 @@ class GradientAwareCBO(Simulation):
 
     def step(self) -> None:
         """Executes a single Euler-Maruyama discretization step for Gradient-Aware CBO."""
-        gradient = self.df(self.particles)
+        gradient = self._eval_grad(self.particles)
 
         # 1. Compute global consensus
         consensus_point = self._compute_consensus_point(self.particles, self.values)
@@ -630,10 +697,8 @@ class GradientAwareCBO(Simulation):
         # -> Variance-Collapsing Diffusion
         # Standard normal increments: dW
         dW = np.random.normal(loc=0.0, scale=1.0, size=self.particles.shape)
-        # Element-wise anisotropic scaling
-        # Add a constant noise floor (e.g., 0.5) so diffusion never drops to zero
-        noise_floor = 0.5
-        diffusion_term = (self.noise_intensity * np.abs(diff_to_consensus) + noise_floor) * self._sqrt_dt * dW
+        # Element-wise anisotropic scaling (standard CBO diffusion, no ad hoc noise floor)
+        diffusion_term = self.noise_intensity * np.abs(diff_to_consensus) * self._sqrt_dt * dW
 
         # 4. Update Swarm Positions
         self.particles = self.particles - grad_drift - consensus_drift + diffusion_term
@@ -642,7 +707,7 @@ class GradientAwareCBO(Simulation):
         self.particles = np.clip(self.particles, self._lower_bounds, self._upper_bounds)
 
         # 6. Evaluate Objective exactly once
-        self.values = self.f(self.particles)
+        self.values = self._eval_obj(self.particles)
 
         # 7. Update memory caches (Local bests)
         improved = self.values < self.best_values
@@ -654,6 +719,11 @@ class GradientAwareCBO(Simulation):
         if self.values[current_min_idx] < self.best_global_value:
             self.best_global_value = self.values[current_min_idx]
             self.best_global_position = self.particles[current_min_idx].copy()
+
+        # 9. Optional temperature annealing (standard CBO practice anneals beta upward, sharpening
+        # consensus over time -- the opposite direction from Softmin's decaying beta)
+        if self.beta_growth is not None:
+            self.beta *= self.beta_growth
 
 
 class GradientAwarePSO(Simulation):
@@ -704,7 +774,7 @@ class GradientAwarePSO(Simulation):
     def step(self) -> None:
         """Executes a single step of the Gradient-Enhanced PSO algorithm."""
         # 1. Compute deterministic gradient drift
-        gradient = self.df(self.particles)
+        gradient = self._eval_grad(self.particles)
         grad_drift = self.learning_rate * gradient
 
         # 2. Generate stochastic tensors for cognitive and social components
@@ -719,11 +789,8 @@ class GradientAwarePSO(Simulation):
         # 4. Update Velocities (Standard PSO + Gradient Drift)
         self.velocities = inertia_term + cognitive_term + social_term - grad_drift
 
-        # 5. Update Positions with Injected Langevin Noise
-        noise_floor = 0.5
-        sde_noise = noise_floor * np.sqrt(self.learning_rate) * np.random.normal(size=self.particles.shape)
-
-        self.particles = self.particles + self.velocities + sde_noise
+        # 5. Update Positions (no ad hoc injected noise floor)
+        self.particles = self.particles + self.velocities
 
         # 6. Fast vectorized clipping using memory views
         # Note: In strict PSO, velocities should also be zeroed out if a particle hits a boundary,
@@ -731,7 +798,7 @@ class GradientAwarePSO(Simulation):
         self.particles = np.clip(self.particles, self._lower_bounds, self._upper_bounds)
 
         # 7. Evaluate Objective strictly once per step
-        self.values = self.f(self.particles)
+        self.values = self._eval_obj(self.particles)
 
         # 8. Update Memory Caches (Cognitive/Personal Bests)
         improved = self.values < self.best_values
@@ -739,6 +806,187 @@ class GradientAwarePSO(Simulation):
         self.best_positions[improved] = self.particles[improved]
 
         # 9. Update Global Knowledge (Social Best)
+        current_min_idx = np.argmin(self.values)
+        if self.values[current_min_idx] < self.best_global_value:
+            self.best_global_value = self.values[current_min_idx]
+            self.best_global_position = self.particles[current_min_idx].copy()
+
+    def reset(self, particle_init: Optional[Union[List, np.ndarray]] = None) -> None:
+        """Resets the environment, ensuring velocities are cleared."""
+        super().reset(particle_init)
+        self.velocities = np.zeros_like(self.particles)
+
+
+class CBO(Simulation):
+    """
+    Vectorized simulation of canonical Consensus-Based Optimization (Carrillo et al.).
+    Zeroth-order: particles are drawn toward a Gibbs-weighted consensus point with
+    variance-collapsing anisotropic diffusion. No gradient information is used.
+    """
+    def __init__(
+        self,
+        n: int,
+        d: int,
+        f: Callable[[np.ndarray], np.ndarray],
+        df: Callable[[np.ndarray], np.ndarray],
+        bounds: Optional[List[List[float]]] = None,
+        particle_init: Optional[List[List[float]]] = None,
+        learning_rate: float = 0.01,          # eta: dt
+        consensus_rate: float = 1.0,          # lambda: attraction pull to the consensus
+        noise_intensity: float = 1.0,         # sigma: diffusion scaling (2*lambda > sigma**2 for stability)
+        beta: float = 10.0,                   # beta: temperature inverse for consensus
+        beta_growth: Optional[float] = None,  # optional annealing: beta *= beta_growth each step
+        name: str = "CBO"
+    ):
+        if bounds is None:
+            bounds = [[-np.inf, np.inf]] * d
+
+        super().__init__(
+            n=n,
+            d=d,
+            f=f,
+            df=df,
+            bounds=bounds,
+            particle_init=particle_init,
+            learning_rate=learning_rate,
+            name=name
+        )
+
+        if consensus_rate < 0 or noise_intensity < 0 or beta <= 0:
+            raise ValueError("Consensus rate, noise intensity, and beta must be strictly positive.")
+        if beta_growth is not None and beta_growth <= 1:
+            raise ValueError("beta_growth must be > 1 (CBO's temperature is annealed upward).")
+
+        self.consensus_rate = consensus_rate
+        self.noise_intensity = noise_intensity
+        self.beta = float(beta)
+        self.beta_growth = beta_growth
+
+        # PRE-ALLOCATION: Cache bounds and compute static scalars
+        self._lower_bounds = np.array([b[0] for b in self.bounds])
+        self._upper_bounds = np.array([b[1] for b in self.bounds])
+        self._sqrt_dt = np.sqrt(self.learning_rate)
+
+    def _compute_consensus_point(self, positions: np.ndarray, values: np.ndarray) -> np.ndarray:
+        """Computes the empirical consensus point c_beta(X) using log-sum-exp stabilization."""
+        min_val = np.min(values)
+        exponentials = np.exp(-self.beta * (values - min_val))
+        weights = exponentials / np.sum(exponentials)
+        return np.sum(positions * weights[:, np.newaxis], axis=0)
+
+    def step(self) -> None:
+        """Executes a single Euler-Maruyama discretization step of standard CBO (no gradient
+        term, no ad hoc noise floor)."""
+        # 1. Compute global consensus
+        consensus_point = self._compute_consensus_point(self.particles, self.values)
+
+        # 2. Compute spatial differences from consensus
+        diff_to_consensus = self.particles - consensus_point
+
+        # 3. Consensus drift
+        consensus_drift = self.consensus_rate * diff_to_consensus * self.learning_rate
+
+        # 4. Variance-collapsing anisotropic diffusion
+        dW = np.random.normal(loc=0.0, scale=1.0, size=self.particles.shape)
+        diffusion_term = self.noise_intensity * np.abs(diff_to_consensus) * self._sqrt_dt * dW
+
+        # 5. Update swarm positions
+        self.particles = self.particles - consensus_drift + diffusion_term
+
+        # 6. Fast vectorized clipping
+        self.particles = np.clip(self.particles, self._lower_bounds, self._upper_bounds)
+
+        # 7. Evaluate objective exactly once (no gradient evaluation at all)
+        self.values = self._eval_obj(self.particles)
+
+        # 8. Update memory caches (local bests)
+        improved = self.values < self.best_values
+        self.best_values[improved] = self.values[improved]
+        self.best_positions[improved] = self.particles[improved]
+
+        # 9. Update global best
+        current_min_idx = np.argmin(self.values)
+        if self.values[current_min_idx] < self.best_global_value:
+            self.best_global_value = self.values[current_min_idx]
+            self.best_global_position = self.particles[current_min_idx].copy()
+
+        # 10. Optional temperature annealing (standard CBO practice: anneal beta upward)
+        if self.beta_growth is not None:
+            self.beta *= self.beta_growth
+
+
+class PSO(Simulation):
+    """
+    Vectorized simulation of canonical Particle Swarm Optimization (Kennedy & Eberhart,
+    Clerc-Kennedy constriction coefficients). Zeroth-order: no gradient information, no
+    injected SDE noise.
+    """
+    def __init__(
+        self,
+        n: int,
+        d: int,
+        f: Callable[[np.ndarray], np.ndarray],
+        df: Callable[[np.ndarray], np.ndarray],
+        bounds: Optional[List[List[float]]] = None,
+        particle_init: Optional[List[List[float]]] = None,
+        learning_rate: float = 0.01,
+        w: float = 0.729,             # Inertia weight
+        c1: float = 1.49445,          # Cognitive coefficient
+        c2: float = 1.49445,          # Social coefficient
+        name: str = "PSO"
+    ):
+        if bounds is None:
+            bounds = [[-np.inf, np.inf]] * d
+
+        super().__init__(
+            n=n,
+            d=d,
+            f=f,
+            df=df,
+            bounds=bounds,
+            particle_init=particle_init,
+            learning_rate=learning_rate,
+            name=name
+        )
+
+        self.w = w
+        self.c1 = c1
+        self.c2 = c2
+
+        self.velocities = np.zeros_like(self.particles)
+
+        self._lower_bounds = np.array([b[0] for b in self.bounds])
+        self._upper_bounds = np.array([b[1] for b in self.bounds])
+
+    def step(self) -> None:
+        """Executes a single step of canonical PSO (no gradient term, no injected noise)."""
+        # 1. Generate stochastic tensors for cognitive and social components
+        r1 = np.random.uniform(0, 1, size=self.particles.shape)
+        r2 = np.random.uniform(0, 1, size=self.particles.shape)
+
+        # 2. Calculate velocity components
+        inertia_term = self.w * self.velocities
+        cognitive_term = self.c1 * r1 * (self.best_positions - self.particles)
+        social_term = self.c2 * r2 * (self.best_global_position - self.particles)
+
+        # 3. Update velocities (standard PSO, no gradient drift)
+        self.velocities = inertia_term + cognitive_term + social_term
+
+        # 4. Update positions (no injected noise)
+        self.particles = self.particles + self.velocities
+
+        # 5. Fast vectorized clipping
+        self.particles = np.clip(self.particles, self._lower_bounds, self._upper_bounds)
+
+        # 6. Evaluate objective exactly once (no gradient evaluation at all)
+        self.values = self._eval_obj(self.particles)
+
+        # 7. Update memory caches (cognitive/personal bests)
+        improved = self.values < self.best_values
+        self.best_values[improved] = self.values[improved]
+        self.best_positions[improved] = self.particles[improved]
+
+        # 8. Update global knowledge (social best)
         current_min_idx = np.argmin(self.values)
         if self.values[current_min_idx] < self.best_global_value:
             self.best_global_value = self.values[current_min_idx]

@@ -9,18 +9,28 @@ from simulations import (
     SimulatedAnnealing,
     GradientAwareCBO,
     GradientAwarePSO,
+    CBO,
+    PSO,
 )
 
 RESULTS_CSV = 'results/master_high_dim_ackley_log_exp_on_dims.csv'
 MAX_STEPS = 10_000_000
 
-HEADER = ['dimension', 'seed', 'softmin_decay', 'sa', 'cbo', 'pso']
+# Standard CBO's inverse temperature is annealed *upward* in the literature (opposite direction
+# from Softmin's decaying beta) -- see run_experiments_resumable.py for the same convention.
+CBO_BETA_GROWTH = 1.001
+
+HEADER = ['dimension', 'seed', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+          'standard_cbo', 'standard_pso']
 
 FILENAME_BY_ALGO = {
     'softmin_decay': "results/SoftMin_decay_ackley_function_dim{dim}.pkl",
     'sa': "results/SimulatedAnnealing_ackley_function_dim{dim}.pkl",
     'cbo': "results/CBO_ackley_function_dim{dim}.pkl",
+    'cbo_annealed': "results/CBO_annealed_ackley_function_dim{dim}.pkl",
     'pso': "results/PSO_ackley_function_dim{dim}.pkl",
+    'standard_cbo': "results/StandardCBO_ackley_function_dim{dim}.pkl",
+    'standard_pso': "results/StandardPSO_ackley_function_dim{dim}.pkl",
 }
 
 
@@ -64,8 +74,22 @@ def worker_task(args):
         bounds=bounds, learning_rate=lr, consensus_rate=1.0,
         noise_intensity=np.sqrt(2 * noise_val), beta=10.0
     )
+    cbo_annealed = GradientAwareCBO(
+        n=100, d=dimension, f=f_vec, df=f_grad_vec,
+        bounds=bounds, learning_rate=lr, consensus_rate=1.0,
+        noise_intensity=np.sqrt(2 * noise_val), beta=10.0, beta_growth=CBO_BETA_GROWTH
+    )
 
     pso = GradientAwarePSO(
+        n=100, d=dimension, f=f_vec, df=f_grad_vec,
+        bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
+    )
+
+    standard_cbo = CBO(
+        n=100, d=dimension, f=f_vec, df=f_grad_vec,
+        bounds=bounds, learning_rate=lr, consensus_rate=1.0, noise_intensity=1.0, beta=10.0
+    )
+    standard_pso = PSO(
         n=100, d=dimension, f=f_vec, df=f_grad_vec,
         bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
     )
@@ -74,9 +98,13 @@ def worker_task(args):
     t_softmin_decay = softmin_decay.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_sa = sa.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_cbo = cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    t_cbo_annealed = cbo_annealed.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_pso = pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    t_standard_cbo = standard_cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    t_standard_pso = standard_pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
 
-    return dimension, seed, t_softmin_decay, t_sa, t_cbo, t_pso
+    return (dimension, seed, t_softmin_decay, t_sa, t_cbo, t_cbo_annealed, t_pso,
+            t_standard_cbo, t_standard_pso)
 
 
 def task_key(t):
@@ -111,6 +139,7 @@ if __name__ == '__main__':
         results_csv=RESULTS_CSV,
         key_indices=[0],   # dimension
         value_start=2,      # skip seed (index 1)
-        algo_names=['softmin_decay', 'sa', 'cbo', 'pso'],
+        algo_names=['softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+                    'standard_cbo', 'standard_pso'],
         filename_fn=filename_for,
     )

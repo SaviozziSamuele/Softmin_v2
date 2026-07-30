@@ -239,3 +239,36 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         ax.grid()
     ax.legend()
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# Ascent-descent prefactor dynamics (A_{t,k})
+# ---------------------------------------------------------------------------
+
+def plot_prefactor_dynamics(sim, figsize=(10, 6)):
+    """Plot each particle's effective learning rate A_{t,k} over iterations.
+
+    Requires `sim` (a `SoftminEnergyAdagrad` instance) to have been constructed with
+    `track_prefactor_history=True` and already run. A_{t,k} > 1 is the "strongly minimizing"
+    regime, 0 < A_{t,k} < 1 is plain minimizing (descent), and A_{t,k} < 0 is the maximizing
+    (ascent/exploration) regime.
+    """
+    history = getattr(sim, "prefactor_history", None)
+    if not history:
+        raise ValueError(
+            "sim.prefactor_history is empty -- construct with track_prefactor_history=True "
+            "and call .run(...) before plotting."
+        )
+
+    history = np.asarray(history)  # shape (n_recorded_steps, n_particles)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    for k in range(history.shape[1]):
+        ax.plot(history[:, k], alpha=0.5, linewidth=1)
+    ax.axhline(0, color="black", linestyle="--", linewidth=1, label="Descent/ascent threshold (A=0)")
+    ax.axhline(1, color="red", linestyle=":", linewidth=1, label="Strongly minimizing threshold (A=1)")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel(r"$A_{t,k}$")
+    ax.set_title("Ascent-Descent Dynamics: per-particle effective learning rate")
+    ax.legend()
+    return fig, ax
