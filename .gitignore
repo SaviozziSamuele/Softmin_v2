@@ -4,3 +4,11 @@ __pycache__/
 .claude/
 .claude.md
 .claudeignore.txt
+.blg
+.fdb_latexmk
+.fls
+.log
+.out
+.aux
+.bbl
+.gz

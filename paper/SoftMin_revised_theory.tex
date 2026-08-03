@@ -21,6 +21,7 @@
 
 \usepackage{todonotes}
 \newcommand{\aanote}[1]{\todo[color=blue!35]{\small AA: #1}}
+\newcommand{\snote}[1]{\todo[color=orange]{\small S: #1}}
 \newcommand{\dd}{\mathrm d}
 
 \newcommand{\theHalgorithm}{\arabic{algorithm}}
@@ -223,6 +224,21 @@ See \ref{apx:technical-proofs}.
 % What \ref{thm:stable-stationary-points} destabilizes is strictly narrower: a configuration containing a particle at a \emph{noncritical} point with \(a_k=0\) (forced there because \(\sum_ja_j=n\) cannot vanish identically). A particle already sitting at a maximum is critical and is not covered by this instability. Consequently the deterministic dynamics can strand the ensemble at any of a lattice of mixed minima/maxima equilibria, and the Brownian term in \eqref{eq:sde} is needed to escape all of these, not merely the fully collapsed suboptimal consensus.
 % \end{remark}
 
+\begin{corollary}[Sufficient condition for stability]
+\label{cor:stability-sufficient}
+Let \(\bar\xx=(\bar x_1,\dots,\bar x_n)\) satisfy \(\nabla f(\bar x_k)=0\) for every \(k\), and assume that for each \(k\) either
+\[
+    a_k(\bar\xx)>0\ \text{ and }\ \nabla^2f(\bar x_k)\succ0,
+    \qquad\text{or}\qquad
+    a_k(\bar\xx)<0\ \text{ and }\ \nabla^2f(\bar x_k)\prec0 .
+\]
+Then \(\nabla^2U_\beta(\bar\xx)\succ0\); in particular \(\bar\xx\) is a strict local minimum of \(U_\beta\) and a locally asymptotically stable equilibrium of \eqref{eq:gradient-flow}.
+\end{corollary}
+ 
+\begin{proof}
+By \ref{lem:gradient-hessian} the Hessian at a fully critical configuration is block diagonal with blocks \(a_k(\bar\xx)\nabla^2f(\bar x_k)\), and each hypothesis makes the corresponding block positive definite.
+\end{proof}
+
 \section{Hitting times and ensemble descent}
 \label{sec:hitting-times}
 
@@ -235,7 +251,7 @@ so \(a_k\) acts as a state-dependent, sign-changing learning rate. The rigorous 
 
 \subsection{One-dimensional basin exit and post-saddle passage}
 \label{sec:exit-times}
-
+ 
 Fix \(n\ge2\), \(\beta>0\), and \(d=1\). Consider three consecutive nondegenerate critical points of \(f\),
 \[
     z_-<s<z_+,
@@ -247,11 +263,13 @@ with \(z_\pm\) local minima and \(s\) the separating local maximum, and assume
     f'(x)<0\ \text{ on }(s,z_+).
     \label{eq:adjacent-well-monotonicity}
 \end{equation}
-Set the relative energy and barrier heights
+Set the relative energy and the barrier height
 \begin{equation}
-    r(x):=f(x)-f(z_-), \qquad h:=r(s)>0, \qquad \rho_+:=r(z_+)\ge0.
+    r(x):=f(x)-f(z_-), \qquad h:=r(s)>0, \qquad \rho_+:=r(z_+)<h .
     \label{eq:relative-energy}
 \end{equation}
+No sign is imposed on \(\rho_+\); the case of interest is \(\rho_+<0\), in which \(z_+\) is a strictly deeper minimum than \(z_-\).
+ 
 For an absolutely continuous path \(\boldsymbol\phi:[0,T]\to\R^n\), the Freidlin--Wentzell action for~\eqref{eq:sde} and the associated quasipotential to a closed set \(A\) are
 \begin{equation}
     I_{0T}(\boldsymbol\phi) :=\frac14\int_0^T\bigl\|\dot{\boldsymbol\phi}+\nabla U_\beta(\boldsymbol\phi)\bigr\|^2\dd t,
@@ -267,87 +285,125 @@ Under the standard hypotheses of Freidlin--Wentzell exit theory~\cite{freidlin20
     \label{eq:gradient-decomposition}
 \end{equation}
 so downhill segments (following the deterministic flow) cost nothing, while an uphill segment following the reversed flow costs exactly the potential increase.
-
+ 
 To build an admissible escape path, freeze \(n-1\) particles at \(z_-\) and let one particle move:
 \begin{equation}
     \Gamma(x):=(x,z_-,\dots,z_-).
     \label{eq:channel}
 \end{equation}
-Along this channel the joint potential depends on the active particle only through its relative energy, and equals (up to a constant) the \emph{reduced potential}
+Factoring \(e^{-\beta f(z_-)}\) out of the Gibbs weights gives \(J_\beta(\Gamma(x))=f(z_-)+u(r(x))/n\), that is, the exact identity
 \begin{equation}
-    u(r):=\frac{n\,r\,e^{-\beta r}}{\,n-1+e^{-\beta r}\,},\qquad r\ge0,
+    U_\beta(\Gamma(x))=n\,f(z_-)+u\bigl(r(x)\bigr),
+    \qquad
+    u(r):=\frac{n\,r\,e^{-\beta r}}{\,n-1+e^{-\beta r}\,},
+    \quad r\in\R,
     \label{eq:reduced-potential}
 \end{equation}
-Let \(r_c>0\) be the unique maximizer of \(u\) on \([0,\infty)\) (its existence and uniqueness are part of \ref{thm:transition-time}). We write the two relevant channel heights as \(u(r_c)=\max_{r\ge0}u(r)\) and \(\max_{0\le r\le h}u(r)=u(\min\{h,r_c\})\).
+where \(u\) is the \emph{reduced potential}. The additive constant \(n f(z_-)\) does not enter \(\nabla U_\beta\), and both the action~\eqref{eq:fw} and the quasipotential depend on \(U_\beta\) only through its increments. Note that \(u\) is defined on all of \(\R\), since \(r(x)\) is negative wherever \(f\) drops below \(f(z_-)\).
+ 
+The reduced potential also records the sign of the drift of the active particle, and this is what fixes the geometry of the channel.
+ 
+\begin{lemma}[Channel drift and shape of the reduced potential]
+\label{lem:channel-drift}
+Let \(a_1\) denote the coefficient~\eqref{eq:coefficient} of the active particle. Then, for every \(x\in\R\),
+\begin{equation}
+    a_1\bigl(\Gamma(x)\bigr)=u'\bigl(r(x)\bigr)
+    =\frac{n\,e^{-\beta r(x)}\,q\bigl(r(x)\bigr)}{\bigl(n-1+e^{-\beta r(x)}\bigr)^{2}},
+    \qquad
+    q(r):=(n-1)(1-\beta r)+e^{-\beta r}.
+    \label{eq:a1-equals-uprime}
+\end{equation}
+The function \(q\) is strictly decreasing on \(\R\) and has a unique zero \(r_c\), which satisfies
+\begin{equation}
+    \frac1\beta<r_c<\frac{n}{(n-1)\beta}.
+    \label{eq:rc-location}
+\end{equation}
+Consequently \(u\) is strictly increasing on \((-\infty,r_c]\) and strictly decreasing on \([r_c,\infty)\), and \(r_c\) is exactly the relative-energy level at which the active particle switches from descent to ascent, i.e.\ the level at which \(f(x)-J_\beta(\Gamma(x))=1/\beta\).
+\end{lemma}
 
+We abbreviate the two relevant channel heights by
+\begin{equation}
+    u_c:=u(r_c)=\max_{r\in\R}u(r),
+    \qquad
+    u_h:=\max_{0\le r\le h}u(r)=u\bigl(\min\{h,r_c\}\bigr).
+    \label{eq:channel-heights}
+\end{equation}
+ 
 \begin{theorem}[One-dimensional basin exit and post-saddle passage]
 \label{thm:transition-time}
 Under the assumptions~\eqref{eq:adjacent-well-monotonicity}--\eqref{eq:relative-energy} the following hold.
 \begin{enumerate}
-    \item \textbf{(Channel profile and barrier cap.)}
-    Along the frozen-background channel,
-    \[
-        U_\beta(\Gamma(x))-U_\beta(\Gamma(z_-))=u(r(x)).
-    \]
-    The reduced potential \(u\) is strictly increasing on \([0,r_c]\), strictly decreasing on \([r_c,\infty)\), and
+    \item \textbf{(Uniform barrier cap.)}
+    The channel barrier is bounded independently of the physical barrier \(h\) and of \(f\):
     \begin{equation}
-        \max_{r\ge0}u(r)=u(r_c)<\frac{n}{e(n-1)\beta}.
+        \;u_c=\max_{r\in\R}u(r)<\frac{n}{e\,(n-1)\,\beta}\;
         \label{eq:barrier-cap}
     \end{equation}
-
-    \item \textbf{(Initial basin exit: quasipotential bound.)} The minimum action among channel paths joining \(\Gamma(z_-)\) to \(\Gamma(s)\) is \(u(\min\{h,r_c\})\). Consequently
+    In particular both the barrier \(u_c\) and, by~\eqref{eq:rc-location}, the switching level \(r_c\) are of order \(\beta^{-1}\), uniformly in \(h\).
+ 
+    \item \textbf{(Initial basin exit: quasipotential bound.)}
+    The minimum action among channel paths joining \(\Gamma(z_-)\) to \(\Gamma(s)\) equals \(u_h\). Consequently
     \begin{equation}
-        V_\beta\bigl(\Gamma(z_-),\Gamma(s)\bigr)\le u(\min\{h,r_c\})<h .
+        V_\beta\bigl(\Gamma(z_-),\Gamma(s)\bigr)\le u_h<\min\{h,r_c\}\le h .
         \label{eq:initial-bound}
     \end{equation}
-    This is a bound on the Freidlin--Wentzell quasipotential itself, established by exhibiting an admissible path; it does not yet assert anything about \(\E\tau^\sigma\).
-
+ 
     \item \textbf{(Post-saddle well and passage.)}
-    Assume in addition
+    Assume
     \begin{equation}
-        \rho_+<r_c<h .
+        r_c<h .
         \label{eq:high-barrier-regime}
     \end{equation}
-    Then \(\Gamma(s)\) is a strict local minimum of \(U_\beta\). Let \(\xi_+\in(s,z_+)\) be the unique point with \(r(\xi_+)=r_c\). The minimum action among channel paths joining \(\Gamma(s)\) to \(\Gamma(\xi_+)\) equals \(u(r_c)-u(h)\), and therefore
-    \begin{equation}
-        V_\beta\bigl(\Gamma(s),\Gamma(\xi_+)\bigr)\le u(r_c)-u(h)<u(r_c).
-        \label{eq:post-saddle-bound}
-    \end{equation}
-    Beyond \(\xi_+\) the deterministic channel dynamics drive the active particle to \(z_+\).
+    Then \(\Gamma(s)\) is a strict local minimum of \(U_\beta\), with channel barrier \(u_c-u(h)\) on the \(z_-\) side (realized at \(x_m\)). The behaviour on the \(z_+\) side depends on where \(\rho_+\) falls relative to \(r_c\):
+    \begin{itemize}
+        \item If \(\rho_+<r_c\), there is a unique \(\xi_+\in(s,z_+)\) with \(r(\xi_+)=r_c\); the channel well at \(\Gamma(s)\) is symmetric, with barrier \(u_c-u(h)\) on this side as well, the minimum action among channel paths joining \(\Gamma(s)\) to \(\Gamma(\xi_+)\) equals \(u_c-u(h)\), and therefore
+        \begin{equation}
+            V_\beta\bigl(\Gamma(s),\Gamma(\xi_+)\bigr)\le u_c-u(h)<u_c ;
+            \label{eq:post-saddle-bound}
+        \end{equation}
+        beyond \(\xi_+\) the deterministic channel dynamics drive the active particle to \(z_+\).
+        \item If instead \(\rho_+\ge r_c\), then \(r(x)\in[r_c,h)\) throughout \((s,z_+)\); since \(u\) is strictly decreasing on \([r_c,\infty)\) and \(r\) is strictly decreasing on \((s,z_+)\), the channel potential \(u(r(x))\) increases monotonically from \(u(h)\) at \(s\) to \(u(\rho_+)\) at \(z_+\), with no interior peak: on this side \(\Gamma(s)\) is not separated from \(\Gamma(z_+)\) by any channel barrier, and no point \(\xi_+\) exists.
+    \end{itemize}
+    If instead \(h\le r_c\), then \(\Gamma(s)\) is not a local minimum of \(U_\beta\) and no post-saddle well forms.
 \end{enumerate}
 \end{theorem}
-
+ 
 \begin{proof}
 See \ref{apx:technical-proofs}.
 \end{proof}
-
+ 
 \begin{corollary}[Exit-time consequence, conditional]
 \label{cor:exit-time-conditional}
-Suppose in addition that \(z_-\) admits a metastable domain \(D_-\subset\R^n\) for the flow \eqref{eq:sde}, in the sense that \(\Gamma(z_-)\) is the unique attractor of \(D_-\) for the noiseless flow \eqref{eq:gradient-flow} and the hypotheses of the Freidlin--Wentzell exit theorem~\cite{freidlin2012random} hold on \(D_-\), with \(\Gamma(\text{the }\min\{h,r_c\}\text{-level point on the channel})\in\partial D_-\) realizing the minimal quasipotential to \(\partial D_-\). Then
+Suppose in addition that \(z_-\) admits a metastable domain \(D_-\subset\R^n\) for the flow \eqref{eq:sde}, in the sense that \(\Gamma(z_-)\) is the unique attractor of \(D_-\) for the noiseless flow \eqref{eq:gradient-flow} and the hypotheses of the Freidlin--Wentzell exit theorem~\cite{freidlin2012random} hold on \(D_-\), with \(\Gamma(x_m)\in\partial D_-\) realizing the minimal quasipotential to \(\partial D_-\), where \(x_m\in(z_-,s]\) is the unique point with \(r(x_m)=\min\{h,r_c\}\). Then
 \[
     \lim_{\sigma\downarrow0}\sigma\log\E_{\Gamma(z_-)}\tau_{D_-}^\sigma
-    =V_\beta\bigl(\Gamma(z_-),\partial D_-\bigr)\le u(\min\{h,r_c\})<h .
+    =V_\beta\bigl(\Gamma(z_-),\partial D_-\bigr)\le u_h<h .
 \]
 We do not construct \(D_-\) or verify these hypotheses here; \ref{thm:transition-time} supplies only the quasipotential bound~\eqref{eq:initial-bound}, which holds unconditionally.
 \end{corollary}
 
+\begin{remark}[Low-barrier regime: acceleration without sign reversal]
+\label{rem:low-barrier}
+By~\eqref{eq:a1-equals-uprime}, \(a_1(\Gamma(x))>0\) precisely when \(r(x)<r_c\). Hence \(u_h=u(h)\), i.e.\ \(\min\{h,r_c\}=h\), exactly in the regime \(h\le r_c\), and there the drift of the active particle is descending along the entire crossing: the sign-reversal mechanism is never activated, the crossing is made entirely against the drift, and by \ref{thm:transition-time}(3) no Softmin-induced well appears at \(s\). The acceleration is nonetheless strict, since \(u(r)/r=ne^{-\beta r}/(n-1+e^{-\beta r})<1\) for \(r>0\) gives \(u(h)<h\). In this regime the gain comes purely from the Gibbs-weight damping of the leading particle's contribution to \(U_\beta\), not from ascent. By~\eqref{eq:rc-location} the regime is \(h\lesssim\beta^{-1}\); the sign-reversal mechanism is what handles barriers beyond that scale.
+\end{remark}
+ 
 \begin{remark}[Interpretation and scope]
 \label{rem:scope}
-Part~1 shows that, along this channel, an arbitrarily high physical barrier \(h\) is flattened to a level of order \(\beta^{-1}\): as \(h\) grows the active particle receives exponentially small Gibbs weight, so the barrier saturates rather than growing with \(h\). Part~2 gives a strict full-system \emph{upper} bound on the exit exponent through an explicit admissible path; because \(V_\beta\) is an infimum over all paths in \(\R^n\), the channel construction can only over-estimate it. Part~3 addresses the post-saddle obstruction: a high barrier may turn the physical maximum \(s\) into a Softmin-induced well, but its depth \(u(r_c)-u(h)\) is strictly below the initial barrier \(u(r_c)\), so it is not a worse obstruction than the one already crossed. The theorem does \emph{not} identify the exact transition exponent between the two basins, which would require ruling out returns to the initial basin and competing collective paths in \(\R^n\).
+Part~1 shows that, along this channel, an arbitrarily high physical barrier \(h\) is flattened to a level of order \(\beta^{-1}\): as \(h\) grows the active particle receives exponentially small Gibbs weight, so the barrier saturates rather than growing with \(h\). Part~2 gives a strict full-system \emph{upper} bound on the exit exponent through an explicit admissible path; because \(V_\beta\) is an infimum over all paths in \(\R^n\), the channel construction can only over-estimate it. % [S6] moved here from the theorem statement.
+It is a bound on the Freidlin--Wentzell quasipotential itself, established by exhibiting an admissible path; it does not yet assert anything about \(\E\tau^\sigma\), for which see \ref{cor:exit-time-conditional}. Part~3 addresses the post-saddle obstruction: a high barrier turns the physical maximum \(s\) into a Softmin-induced well. When \(\rho_+<r_c\) this well is symmetric, with depth \(u_c-u(h)\) strictly below the initial barrier \(u_c\), so it is not a worse obstruction than the one already crossed; when \(\rho_+\ge r_c\) there is no obstruction on the \(z_+\) side at all, which is only more favorable. The theorem does \emph{not} identify the exact transition exponent between the two basins, which would require ruling out returns to the initial basin and competing collective paths in \(\R^n\).
 \end{remark}
-
+ 
 \begin{remark}[Comparison with independent Langevin dynamics]
 \label{rem:comparison}
 For a single overdamped Langevin particle in the potential \(f\) started at \(z_-\), the classical small-noise exit exponent from the basin of \(z_-\) is the physical barrier \(h=f(s)-f(z_-)\)~\cite{freidlin2012random}. For \(n\) \emph{independent} copies, the first of the \(n\) exit times has the same exponential scale \(h\): taking a minimum over \(n\) i.i.d.\ variables with common exponential rate \(h/\sigma\) changes only the polynomial-in-\(n\) prefactor, not the exponent, as \(\sigma\downarrow0\).
-
-By~\eqref{eq:initial-bound}, the channel construction gives \(V_\beta(\Gamma(z_-),\Gamma(s))\le u(\min\{h,r_c\})<h\) for the joint Softmin diffusion. This is a comparison of an \emph{upper bound on a quasipotential} for the interacting system against the \emph{exact} exponent \(h\) of the noninteracting one; it shows the admissible channel is exponentially cheaper than independent escape, not that the true joint exit exponent is smaller. The stronger, exit-\emph{time} statement "the interaction cannot slow escape" holds only under the hypotheses of \ref{cor:exit-time-conditional}, which are not verified in this paper.
+ 
+By~\eqref{eq:initial-bound}, the channel construction gives \(V_\beta(\Gamma(z_-),\Gamma(s))\le u_h<h\) for the joint Softmin diffusion, in \emph{every} regime of \(h\) (see \ref{rem:low-barrier}). This is a comparison of an \emph{upper bound on a quasipotential} for the interacting system against the \emph{exact} exponent \(h\) of the noninteracting one; it shows the admissible channel is exponentially cheaper than independent escape, not that the true joint exit exponent is smaller. The stronger, exit-\emph{time} statement ``the interaction cannot slow escape'' holds only under the hypotheses of \ref{cor:exit-time-conditional}, which are not verified in this paper.
 \end{remark}
-
+ 
 \begin{remark}[Higher dimensions and annealing]
 \label{rem:higher-dim}
-The channel identity of Part~1 extends algebraically to \(d>1\): at a critical point \(s\) of \(f\) the active Hessian block is \(u'(h)\nabla^2 f(s)\), so if \(s\) is an index-one saddle and \(u'(h)<0\) the induced local minimum is a genuinely one-dimensional phenomenon, and transverse unstable directions may open cheaper escape routes. Regarding temperature, the fixed-\(\beta\) bound \eqref{eq:barrier-cap} decreases like \(\beta^{-1}\), favouring large \(\beta\) for barrier reduction; but large \(\beta\) also suppresses the drift of non-leading particles through their Gibbs weights. A decaying schedule \(\beta_t\) is therefore natural, and is used heuristically in the experiments; its rigorous large-deviation analysis is left open.
+The channel identity~\eqref{eq:reduced-potential} extends algebraically to \(d>1\): at a critical point \(s\) of \(f\) the active Hessian block is \(u'(h)\nabla^2 f(s)\) by~\eqref{eq:a1-equals-uprime}, so if \(s\) is an index-one saddle and \(u'(h)<0\) the induced local minimum is a genuinely one-dimensional phenomenon, and transverse unstable directions may open cheaper escape routes. Regarding temperature, the fixed-\(\beta\) bound~\eqref{eq:barrier-cap} decreases like \(\beta^{-1}\), favouring large \(\beta\) for barrier reduction; but large \(\beta\) also suppresses the drift of non-leading particles through their Gibbs weights. A decaying schedule \(\beta_t\) is therefore natural, and is used heuristically in the experiments; its rigorous large-deviation analysis is left open.
 \end{remark}
-
 \subsection{Descent of the ensemble minimum}
 \label{sec:convergence-rate}
 
@@ -470,38 +526,70 @@ Since \(a_k(\bar\xx)\ne0\), \eqref{eq:g-prime} gives \(g'(f(\bar x_k))\ne0\), so
 If \(a_k(\bar\xx)>0\), then \(g\) is strictly increasing near \(f(\bar x_k)\), so local minimality of \(U_\beta\) forces \(f(x_k)\ge f(\bar x_k)\) for \(x_k\) near \(\bar x_k\); thus \(\bar x_k\) is a local minimum of \(f\). If \(a_k(\bar\xx)<0\), the symmetric argument shows \(\bar x_k\) is a local maximum. Because \(nw_k>0\), the sign of \(a_k\) is that of \(1-\beta(f(\bar x_k)-J_\beta(\bar\xx))\), giving the stated threshold. Finally, \eqref{eq:sum-a} forces some \(a_k(\bar\xx)>0\), so at least one particle is at a local minimum of \(f\).
 \end{proof}
 
+\subsection{Proof of \texorpdfstring{\ref{lem:channel-drift}}{Lemma A.2}}
+ 
+\begin{proof}
+Write \(r:=r(x)\). Factoring \(e^{-\beta f(z_-)}\) out of the Gibbs weights at \(\Gamma(x)\),
+\[
+    w_1(\Gamma(x))=\frac{e^{-\beta r}}{n-1+e^{-\beta r}},
+    \qquad
+    w_j(\Gamma(x))=\frac{1}{n-1+e^{-\beta r}}\quad (j\ge2),
+\]
+whence \(J_\beta(\Gamma(x))-f(z_-)=r e^{-\beta r}/(n-1+e^{-\beta r})=u(r)/n\), which is~\eqref{eq:reduced-potential}. Therefore
+\[
+    f(x)-J_\beta(\Gamma(x))=r-\frac{re^{-\beta r}}{n-1+e^{-\beta r}}
+    =\frac{(n-1)\,r}{n-1+e^{-\beta r}},
+\]
+and substituting into \(a_1=n w_1\bigl[1-\beta(f(x)-J_\beta)\bigr]\) gives
+\[
+    a_1(\Gamma(x))
+    =\frac{n e^{-\beta r}}{n-1+e^{-\beta r}}\cdot
+     \frac{n-1+e^{-\beta r}-\beta(n-1)r}{n-1+e^{-\beta r}}
+    =\frac{n e^{-\beta r}\,q(r)}{\bigl(n-1+e^{-\beta r}\bigr)^{2}} .
+\]
+Differentiating~\eqref{eq:reduced-potential} directly yields the same expression for \(u'(r)\), proving~\eqref{eq:a1-equals-uprime}. In particular \(a_1(\Gamma(x))=0\) if and only if \(q(r)=0\), which by the displayed formula for \(f(x)-J_\beta\) is equivalent to \(f(x)-J_\beta(\Gamma(x))=1/\beta\), i.e.\ to the vanishing of the Softmin threshold gap of the active particle.
+ 
+Since \(q'(r)=-\beta(n-1)-\beta e^{-\beta r}<0\) for all \(r\in\R\), \(q(0)=n>0\) and \(q(r)\to-\infty\) as \(r\to\infty\), \(q\) has a unique zero \(r_c>0\). From \(q(1/\beta)=e^{-1}>0\) we get \(r_c>1/\beta\); and \(q(r_c)=0\) reads \((n-1)(\beta r_c-1)=e^{-\beta r_c}<1\), giving \(\beta r_c<n/(n-1)\). This is~\eqref{eq:rc-location}. As \(n e^{-\beta r}/(n-1+e^{-\beta r})^2>0\), the sign of \(u'\) is the sign of \(q\), so \(u\) is strictly increasing on \((-\infty,r_c]\) and strictly decreasing on \([r_c,\infty)\).
+\end{proof}
+ 
 \subsection{Proof of \texorpdfstring{\ref{thm:transition-time}}{Theorem 3.1}}
-
+ 
 \begin{proof}
 \emph{Part 1.}
-Factoring \(e^{-\beta f(z_-)}\) from the Gibbs weights,
+For \(r\le0\) we have \(u(r)\le0\). For \(r>0\), since \(n-1+e^{-\beta r}>n-1\),
 \[
-    J_\beta(\Gamma(x)) =f(z_-)+\frac{r(x)e^{-\beta r(x)}}{n-1+e^{-\beta r(x)}},
+    u(r)<\frac{n}{n-1}\,r\,e^{-\beta r}
+    \le\frac{n}{n-1}\,\max_{\rho\ge0}\rho e^{-\beta\rho}
+    =\frac{n}{e(n-1)\beta},
 \]
-and multiplying by \(n\) gives
-\(U_\beta(\Gamma(x))-U_\beta(\Gamma(z_-))=u(r(x))\). Differentiating,
-\[
-    u'(r)=\frac{ne^{-\beta r}\,q(r)}{(n-1+e^{-\beta r})^2},
-    \qquad
-    q(r):=(n-1)(1-\beta r)+e^{-\beta r}.
-\]
-Since \(q'(r)=-\beta(n-1)-\beta e^{-\beta r}<0\), \(q(0)=n>0\) and \(q(r)\to-\infty\), \(q\) has a unique zero \(r_c>0\); thus \(u\) increases on \([0,r_c]\) and decreases on \([r_c,\infty)\). From \(u(r)<\tfrac{n}{n-1}re^{-\beta r}\) and \(\max_{r\ge0}re^{-\beta r}=1/(e\beta)\) we get \(u(r_c)<n/(e(n-1)\beta)\), proving~\eqref{eq:barrier-cap}.
-
+the maximum being attained at \(\rho=1/\beta\). Hence \(u_c=\max_\R u<n/(e(n-1)\beta)\), which is~\eqref{eq:barrier-cap}; the bound on \(r_c\) is~\eqref{eq:rc-location}.
+ 
 \emph{Part 2.}
 A channel path has the form \(\boldsymbol\phi(t)=\Gamma(\psi(t))\); the frozen coordinates stay at the critical point \(z_-\), so their drift vanishes and, with \(W(x):=u(r(x))\), the action reduces to \(I_{0T}=\tfrac14\int_0^T|\dot\psi+W'(\psi)|^2\,\dd t\). The one-dimensional version of~\eqref{eq:gradient-decomposition} is
 \[
     I_{0T}=W(\psi(T))-W(\psi(0))+\tfrac14\int_0^T|\dot\psi-W'(\psi)|^2\,\dd t .
 \]
-Let \(x_m\in(z_-,s]\) be the unique point with \(r(x_m)=\min\{h,r_c\}\), which exists because \(r\) is strictly increasing on \((z_-,s)\) by~\eqref{eq:adjacent-well-monotonicity}. Every continuous channel path from \(z_-\) to \(s\) passes through \(x_m\), which realizes the largest value of \(u\) attained for \(0\le r\le h\); hence the action is at least \(W(x_m)-W(z_-)=u(\min\{h,r_c\})\). This value is attained in the quasipotential sense by following the reversed deterministic flow from \(z_-\) up to \(x_m\) (cost exactly \(u(\min\{h,r_c\})\)) and then the forward flow toward \(s\) at zero additional cost, with standard finite-time approximations near the critical points. Therefore the channel quasipotential equals \(u(\min\{h,r_c\})\), and since \(V_\beta\) is an infimum over the larger class of all paths in \(\R^n\),
+By~\eqref{eq:adjacent-well-monotonicity}, \(r\) is a strictly increasing bijection from \([z_-,s]\) onto \([0,h]\), so there is a unique \(x_m\in(z_-,s]\) with \(r(x_m)=\min\{h,r_c\}\). On \([z_-,x_m]\) we have \(r(x)\le r_c\), so by \ref{lem:channel-drift} \(W\) is strictly increasing there, with total rise \(W(x_m)-W(z_-)=u_h\); on \([x_m,s]\) we have \(r(x)\ge r_c\), so \(W\) is nonincreasing. Every continuous channel path from \(z_-\) to \(s\) passes through \(x_m\), and applying the displayed decomposition to the sub-path up to the first hitting time of \(x_m\) bounds the action from below by \(u_h\). This value is attained in the quasipotential sense by following the reversed deterministic flow from \(z_-\) up to \(x_m\) (cost exactly \(u_h\)) and then the forward flow toward \(s\) at zero additional cost, with the standard finite-time approximations near the critical points. Therefore the channel quasipotential equals \(u_h\), and since \(V_\beta\) is an infimum over the larger class of all paths in \(\R^n\),
 \[
-    V_\beta\bigl(\Gamma(z_-),\Gamma(s)\bigr)\le u(\min\{h,r_c\}).
+    V_\beta\bigl(\Gamma(z_-),\Gamma(s)\bigr)\le u_h .
 \]
-Because \(u(r)/r=ne^{-\beta r}/(n-1+e^{-\beta r})<1\) for \(r>0\), we have \(u(\min\{h,r_c\})<\min\{h,r_c\}\le h\), which gives~\eqref{eq:initial-bound}. The exit-time statement then follows from the Freidlin--Wentzell exit theorem whenever its hypotheses hold for \(D_-\).
-
+Because \(u(r)/r=ne^{-\beta r}/(n-1+e^{-\beta r})<1\) for \(r>0\), we have \(u_h<\min\{h,r_c\}\le h\), which gives~\eqref{eq:initial-bound}.
+ 
 \emph{Part 3.}
-Assume \(\rho_+<r_c<h\). At \(\mathbf s:=\Gamma(s)\) every particle is at a critical point of \(f\) (either \(s\) or \(z_-\)), so by \ref{lem:gradient-hessian} the Hessian of \(U_\beta\) is block diagonal with blocks \(a_k(\mathbf s)f''(\cdot)\). For the active particle, \(a_1(\mathbf s)f''(s)=u'(h)f''(s)\); since \(h>r_c\) gives \(u'(h)<0\) and \(f''(s)<0\) (nondegenerate maximum), this block is positive. For a frozen particle at \(z_-\), \(a_j(\mathbf s)=nw_j(\mathbf s)[1+\beta(J_\beta(\mathbf s)-f(z_-))]>0\) because \(J_\beta(\mathbf s)>f(z_-)\), and \(f''(z_-)>0\); so these blocks are positive too. Hence \(\nabla^2 U_\beta(\mathbf s)\succ0\) and \(\mathbf s\) is a strict local minimum.
-
-On \((s,z_+)\), \(r\) decreases strictly from \(h\) to \(\rho_+\), so there is a unique \(\xi_+\) with \(r(\xi_+)=r_c\). Between \(s\) and \(\xi_+\) the reduced potential rises from \(u(h)\) to \(u(r_c)\); the gradient-action argument of Part~2 gives channel action \(u(r_c)-u(h)\), and since \(0<u(h)<u(r_c)\) we obtain~\eqref{eq:post-saddle-bound}. Finally, for \(x\in(\xi_+,z_+)\) we have \(r(x)<r_c\), hence \(u'(r(x))>0\), while \(f'(x)<0\); therefore the active coordinate of the deterministic channel flow satisfies \(\dot x=-u'(r(x))f'(x)>0\), driving the particle toward \(z_+\).
+Assume \(r_c<h\). At \(\Gamma(s)\) every particle sits at a critical point of \(f\) (either \(s\) or \(z_-\)). For the active particle, \eqref{eq:a1-equals-uprime} gives \(a_1(\Gamma(s))=u'(h)<0\) because \(h>r_c\), and \(f''(s)<0\) since \(s\) is a nondegenerate maximum. For a frozen particle at \(z_-\),
+\[
+    a_j(\Gamma(s))=n w_j(\Gamma(s))\bigl[1+\beta\bigl(J_\beta(\Gamma(s))-f(z_-)\bigr)\bigr]>0
+\]
+by~\eqref{eq:reduced-potential}, since \(J_\beta(\Gamma(s))-f(z_-)=u(h)/n>0\), and \(f''(z_-)>0\).
+Hence \ref{cor:stability-sufficient} applies and \(\Gamma(s)\) is a strict local minimum of \(U_\beta\). On the \(z_-\) side, \(r\) decreases strictly from \(h\) through \(r_c\) as \(x\) moves from \(s\) toward \(z_-\) (recall \(x_m\in(z_-,s)\) is where \(r(x_m)=r_c\), well-defined since \(r_c<h\)), so the channel well at \(\Gamma(s)\) has barrier \(u_c-u(h)\) on this side unconditionally --- this uses only \(r_c<h\), not \(\rho_+\).
+ 
+The \(z_+\) side depends on \(\rho_+\). On \((s,z_+)\), \(r\) decreases strictly from \(h\) to \(\rho_+\) by~\eqref{eq:adjacent-well-monotonicity}--\eqref{eq:relative-energy}.
+ 
+If \(\rho_+<r_c\), then \(r\) crosses \(r_c\) on this interval, so there is a unique \(\xi_+\) with \(r(\xi_+)=r_c\). Between \(s\) and \(\xi_+\) the reduced potential rises from \(u(h)\) to \(u_c\); the gradient-action argument of Part~2 gives channel action \(u_c-u(h)\), and since \(0<u(h)<u_c\) we obtain~\eqref{eq:post-saddle-bound}, so the well is symmetric. Finally, for \(x\in(\xi_+,z_+)\) we have \(r(x)<r_c\), hence \(a_1(\Gamma(x))=u'(r(x))>0\) by~\eqref{eq:a1-equals-uprime}, while \(f'(x)<0\); therefore the active coordinate of the deterministic channel flow satisfies \(\dot x=-a_1(\Gamma(x))f'(x)>0\), driving the particle toward \(z_+\).
+ 
+If instead \(\rho_+\ge r_c\), then \(r(x)\in[r_c,h)\) for every \(x\in(s,z_+)\): the interval is entirely on the decreasing side of \(u\), where \(u\) and \(r\) are both strictly decreasing in \(x\), so \(u(r(x))\) is strictly \emph{increasing} in \(x\) throughout \((s,z_+)\), from \(u(h)\) to \(u(\rho_+)\). No interior peak occurs, so no point \(\xi_+\) with \(r(\xi_+)=r_c\) exists in \((s,z_+)\), and the channel presents no barrier separating \(\Gamma(s)\) from \(\Gamma(z_+)\) on this side.
+ 
+If instead \(h\le r_c\), then \(r(x)\le h\le r_c\) for \(x\) near \(s\), with equality only at \(x=s\), and the strict monotonicity of \(u\) on \((-\infty,r_c]\) shows that \(x\mapsto u(r(x))\) has a strict local \emph{maximum} at \(s\). Hence \(\Gamma(s)\) is not a local minimum of \(U_\beta\).
 \end{proof}
 
 \subsection{Proof of \texorpdfstring{\ref{thm:ensemble-min}}{Theorem 3.2}}
