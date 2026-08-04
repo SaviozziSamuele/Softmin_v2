@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+venv/
+src/requirements_linux.txt
 .claude/
 .claude.md
 .claudeignore.txt

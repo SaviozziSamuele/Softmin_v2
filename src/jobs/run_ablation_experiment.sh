@@ -15,11 +15,9 @@
 # policy requires an explicit cap.
 
 module purge
-# Verify this is still the current version with `module avail anaconda3` -- pin drifts over time.
-module load anaconda3/2021.05-gcc-12.2.0
-
-# TODO: activate the project's conda/venv environment here, e.g.:
-# conda activate <your-env-name>
+module load anaconda3
+eval "$(conda shell.bash hook)"
 
 cd "$(dirname "$0")/.."   # src/jobs/ -> src/
+conda activate ./venv
 python run_ablation_experiment.py
