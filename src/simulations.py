@@ -162,6 +162,11 @@ class Simulation(ABC):
 
         start_time = time.perf_counter()
         for i in range(max_steps):
+            # Mirrors run()'s bookkeeping: self.n_steps must advance here too, not just in run(),
+            # since SimulatedAnnealing.temperature() reads it to drive its cooling schedule --
+            # without this, step()-driven loops like this one never cool (see first_value_time's
+            # matching fix for the same reason).
+            self.n_steps = i + 1
             self.step()
             # Vectorized logical AND across all bounds, then checking if ANY particle satisfies ALL dimension bounds
             in_bounds = np.all((self.particles > lower_bounds) & (self.particles < upper_bounds), axis=1)
@@ -179,6 +184,61 @@ class Simulation(ABC):
 
         self.wall_clock_seconds += time.perf_counter() - start_time
         logger.warning(f"Maximum steps ({max_steps}) reached without entering target set.")
+        return max_steps * self.learning_rate
+
+    def first_value_time(
+        self,
+        target_value: float,
+        max_steps: int = 10_000,
+        abort_on_collapse: bool = True,
+        checkpoints: Optional[List[int]] = None,
+    ) -> float:
+        """
+        Value-space analogue of `first_entry_time`: returns the first step at which
+        `self.best_global_value` drops to or below `target_value`, instead of testing whether any
+        particle enters a coordinate-space target box. Needed for benchmarks (e.g. Lennard-Jones
+        clusters) whose global minimum is degenerate under a symmetry group (rotation, atom
+        permutation, ...), so no small coordinate-space box can capture "this is *a* copy of the
+        global minimum" -- only the objective value is well-defined as a target.
+
+        `abort_on_collapse` mirrors `first_entry_time`'s trapped-swarm check but is exposed rather
+        than hardcoded True: in some settings (e.g. an RL objective) a collapsed ensemble can mean
+        *success* -- every particle converged to the same good policy -- not failure.
+
+        If `checkpoints` is given (a sequence of step indices), `self.best_global_value` is
+        recorded at each of those steps into `self.value_checkpoints` (a dict step -> value), for
+        best-value-vs-budget curves independent of whether/when the target was hit.
+        """
+        checkpoint_set = set(checkpoints) if checkpoints is not None else None
+        if checkpoint_set is not None:
+            self.value_checkpoints = {}
+
+        start_time = time.perf_counter()
+        for i in range(max_steps):
+            # See the matching comment in first_entry_time: self.n_steps must advance here too,
+            # or SimulatedAnnealing's temperature() (and anything else keyed on step count) never
+            # progresses when driven through this loop instead of run().
+            self.n_steps = i + 1
+            self.step()
+
+            if checkpoint_set is not None and i in checkpoint_set:
+                self.value_checkpoints[i] = self.best_global_value
+
+            # Guard against a clamped/overflowed value spuriously satisfying the target.
+            if np.isfinite(self.best_global_value) and self.best_global_value <= target_value:
+                logger.info(f"Target value reached at step {i}.")
+                self.wall_clock_seconds += time.perf_counter() - start_time
+                return i * self.learning_rate
+
+            if abort_on_collapse and i % 1000 == 0:
+                # If the max standard deviation across all spatial dimensions is functionally zero
+                if np.max(np.std(self.particles, axis=0)) < 1e-6:
+                    # The swarm is permanently trapped. Abort the simulation to save CPU time.
+                    self.wall_clock_seconds += time.perf_counter() - start_time
+                    return max_steps * self.learning_rate
+
+        self.wall_clock_seconds += time.perf_counter() - start_time
+        logger.warning(f"Maximum steps ({max_steps}) reached without reaching target value.")
         return max_steps * self.learning_rate
 
     def reset(self, particle_init: Optional[Union[List, np.ndarray]] = None) -> None:
