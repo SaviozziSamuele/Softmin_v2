@@ -13,6 +13,6 @@ module purge
 module load anaconda3
 eval "$(conda shell.bash hook)"
 
-cd "$(dirname "$0")/.."   # src/jobs/ -> src/
+cd /scratch/saviozzi/Softmin_v2/src
 conda activate ./venv
 python run_theory_verification.py
