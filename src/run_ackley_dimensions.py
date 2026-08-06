@@ -20,11 +20,11 @@ MAX_STEPS = 10_000_000
 # from Softmin's decaying beta) -- see run_experiments_resumable.py for the same convention.
 CBO_BETA_GROWTH = 1.001
 
-HEADER = ['dimension', 'seed', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+HEADER = ['dimension', 'seed', 'softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
           'standard_cbo', 'standard_pso']
 
 FILENAME_BY_ALGO = {
-    'softmin_decay': "results/SoftMin_decay_ackley_function_dim{dim}.pkl",
+    'softmin': "results/SoftMin_ackley_function_dim{dim}.pkl",
     'sa': "results/SimulatedAnnealing_ackley_function_dim{dim}.pkl",
     'cbo': "results/CBO_ackley_function_dim{dim}.pkl",
     'cbo_annealed': "results/CBO_annealed_ackley_function_dim{dim}.pkl",
@@ -51,21 +51,37 @@ def worker_task(args):
     bounds = setting['bounds']
 
     noise_val = 1.0
-    lr = 0.01
+    # Unified with every other driver (was 0.01, the only driver in this "main comparison" family
+    # that didn't already use 0.001 -- no documented reason for the split was ever found). The
+    # existing MAX_STEPS=10_000_000 has ample headroom either way: at the old lr=0.01, a mid-sweep
+    # d=50 run reached the target in ~60,000 steps (0.6% of budget); a 10x smaller lr needs
+    # roughly 10x more steps for the same physical progress, still only ~6% of budget.
+    lr = 0.001
 
-    # 3. Instantiate Softmin with Beta Decay
-    softmin_decay = SoftminEnergyAdagrad(
+    # 3. Instantiate Softmin with a fixed beta (switched from a beta_decay=0.999 schedule, per
+    # user request). The beta*(f_i - J_beta) "ensemble fairness" gap diagnostic alone favored
+    # beta=1.0 here, but that diagnostic doesn't reflect what first_entry_time actually rewards
+    # (see run_experiments_resumable.py for the full explanation). Directly measuring escape time
+    # at d=50 across beta in {50, 30, 10, 3, 1, 0.3, 0.1}: beta=1.0 TIMED OUT completely (100,000
+    # step budget), while beta=10.0 (the class default) succeeded in ~92,600 steps, matching
+    # beta=30/50's performance almost exactly (beta=3 also worked, marginally slower) -- the same
+    # "smaller beta looks fairer but is actually much slower or fails outright" pattern found on
+    # every other benchmark tested. Kept explicit rather than left as a silent default.
+    ACKLEY_SOFTMIN_BETA = 10.0
+    softmin = SoftminEnergyAdagrad(
         n=100, d=dimension, f=f_vec, df=f_grad_vec, bounds=bounds,
-        name=f"SoftMin_decay_ackley_function_dim{dimension}",
-        initial_lr=0.01, adaptive_lr=False, noise_intensity=1.0,
-        noise="normal", beta_decay=0.999
+        name=f"SoftMin_ackley_function_dim{dimension}",
+        initial_lr=lr, adaptive_lr=False, noise_intensity=1.0,
+        noise="normal", beta_decay=None, beta=ACKLEY_SOFTMIN_BETA
     )
 
-    # 4. Instantiate Simulated Annealing
+    # 4. Instantiate Simulated Annealing (cooling_rate=0.9999 diagnostic-confirmed healthy for
+    # this benchmark -- t_star/entry_steps ~ 0.5 at d=50, unlike double_well/quadruple_well -- so
+    # left unchanged, see run_experiments_resumable.py for where it needed to change)
     sa = SimulatedAnnealing(
         n=100, d=dimension, f=f_vec, df=f_grad_vec, bounds=bounds,
         name=f"SimulatedAnnealing_ackley_function_dim{dimension}",
-        learning_rate=0.01, cooling_rate=0.9999, noise=1.0,
+        learning_rate=lr, cooling_rate=0.9999, noise=1.0,
         cooling_schedule="geometric", initial_temperature=10.0
     )
 
@@ -95,7 +111,7 @@ def worker_task(args):
     )
 
     # 5. Execute vectorized step loops
-    t_softmin_decay = softmin_decay.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    t_softmin = softmin.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_sa = sa.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_cbo = cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_cbo_annealed = cbo_annealed.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
@@ -103,7 +119,7 @@ def worker_task(args):
     t_standard_cbo = standard_cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_standard_pso = standard_pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
 
-    return (dimension, seed, t_softmin_decay, t_sa, t_cbo, t_cbo_annealed, t_pso,
+    return (dimension, seed, t_softmin, t_sa, t_cbo, t_cbo_annealed, t_pso,
             t_standard_cbo, t_standard_pso)
 
 
@@ -139,7 +155,7 @@ if __name__ == '__main__':
         results_csv=RESULTS_CSV,
         key_indices=[0],   # dimension
         value_start=2,      # skip seed (index 1)
-        algo_names=['softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+        algo_names=['softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
                     'standard_cbo', 'standard_pso'],
         filename_fn=filename_for,
     )

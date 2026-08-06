@@ -38,13 +38,20 @@ def worker_task(args):
 
     noise_val = 1.0
     lr = 0.001
+    # Same diagnostic-guided value as the double_well series in run_experiments_resumable.py --
+    # this ablation shares the exact same benchmark. Direct escape-time measurement across
+    # beta in {50, 30, 20, 15, 10, 3, 1, 0.3, 0.1, 0.03, 0.01} at delta=15 found beta=10.0 (the
+    # class default) at or near the actual optimum -- escape doesn't meaningfully improve above
+    # it and fails outright below ~1 (see run_experiments_resumable.py for the full comparison,
+    # including the quadruple_well case where going above 10 is markedly worse, not just flat).
+    beta = 10.0
 
     entry_times = []
     for mode in PREFACTOR_MODES:
         softmin_variant = SoftminEnergyAdagrad(
             n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
             initial_lr=lr, adaptive_lr=False, noise_intensity=noise_val,
-            bounds=bounds, noise="normal", beta_decay=None, prefactor_mode=mode
+            bounds=bounds, noise="normal", beta_decay=None, prefactor_mode=mode, beta=beta
         )
         entry_times.append(softmin_variant.first_entry_time(target_set=set_, max_steps=MAX_STEPS))
 

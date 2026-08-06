@@ -6,8 +6,6 @@ from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv
 from potentials import (
     one_dimensional_double_well,
     unbalanced_quadruple_well_setting,
-    ackley_function_setting,
-    initialize_on_circle,
 )
 from simulations import (
     SoftminEnergyAdagrad,
@@ -18,19 +16,29 @@ from simulations import (
     PSO,
 )
 
-job_id = os.environ.get("SLURM_JOB_ID", "local")
-RESULTS_CSV = f'results/master_experiment_log_decay_{job_id}.csv'
+# Fixed filename, matching every other driver's convention -- previously keyed by SLURM_JOB_ID,
+# which never actually provided real crash-resumability (no job script sets --requeue) and just
+# orphaned a fresh CSV on every resubmission instead of resuming the previous one.
+RESULTS_CSV = 'results/master_experiment_log_decay.csv'
 MAX_STEPS = 2_000_000_000
 
 # Standard CBO's inverse temperature is annealed *upward* in the literature (opposite direction
 # from Softmin's decaying beta) -- see GradientAwareCBO's beta_growth / CBO's beta_growth.
 CBO_BETA_GROWTH = 1.001
 
-# experiment, parameter, seed, softmin, softmin_decay, sa, cbo, cbo_annealed, pso,
-# standard_cbo, standard_pso
+# experiment, parameter, seed, softmin, sa, cbo, cbo_annealed, pso, standard_cbo, standard_pso
+#
+# softmin_decay was dropped from the sweep (2026-08-05): a direct escape-time comparison across
+# beta in {50, 30, 20, 15, 10, 3, 1, 0.3, 0.1, 0.03, 0.01} and decay/growth schedules at both
+# mid-sweep (delta=15/A=15) and hard (delta=30/A=30) settings found a properly-tuned fixed beta
+# consistently reaches the target faster than every decaying or increasing schedule tested, with
+# the gap widening at harder barriers (up to ~20x on quadruple_well A=30) -- see Remark
+# rem:higher-dim and Appendix hyperparameters section. Continuing to run the full decaying-beta
+# sweep at MAX_STEPS=2e9 would roughly double softmin's compute cost for a result already settled
+# by the single-example comparison; that comparison is reported directly in the paper instead.
 HEADER = [
     'experiment', 'parameter', 'seed',
-    'softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+    'softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
     'standard_cbo', 'standard_pso',
 ]
 
@@ -52,11 +60,6 @@ def worker_task(args):
         setting = unbalanced_quadruple_well_setting(param, -1)  # param is A
         d = 2
         particle_init = setting['particle_init']
-    elif exp_name == 'ackley':
-        setting = ackley_function_setting()
-        d = 2
-        # param is radius
-        particle_init = initialize_on_circle(100, param, noise=0.1)
     else:
         raise ValueError(f"Unknown experiment: {exp_name}")
 
@@ -68,21 +71,37 @@ def worker_task(args):
     noise_val = 1.0
     lr = 0.001
 
+    # Diagnostic-guided (src/hyperparameter_diagnostics.py) -- and a genuine correction along the
+    # way: the beta*(f_i - J_beta) "ensemble fairness" gap diagnostic alone favored a much smaller
+    # beta (most trailing particles are past the "essentially frozen" threshold at beta=10), but
+    # that diagnostic only measures whether EVERY particle gets rescue-drift, not what the
+    # first_entry_time metric actually rewards (the FASTEST particle reaching target, matching how
+    # a leader's own prefactor -> n as beta grows, per the theory). Directly measuring actual
+    # escape time at delta=15/A=15 across beta in {10, 3, 1, 0.3, 0.1, 0.03, 0.01} showed escape
+    # getting monotonically SLOWER as beta shrinks below 10, and failing entirely (timeout) below
+    # ~1 -- the opposite ranking from the gap-fairness proxy. beta=10.0 (the class default) was the
+    # fastest value tested; kept explicit here rather than left as a silent default so this
+    # reasoning is auditable.
+    SOFTMIN_BETA = 10.0
+
+    # Diagnostic-guided: cooling_rate=0.9999 was found to never escape the quadruple well at all
+    # within a 200,000-step probe (cooling reaches 5% of initial temperature by step ~30,000, long
+    # before any escape happens) while working fine on the double well -- a real, previously
+    # undiagnosed failure mode for this driver's harder quadruple_well settings, not a genuine
+    # "SA can't solve this" finding. 0.99995 escapes the same quadruple_well probe in ~1100 steps
+    # and doesn't regress the double well (1570 vs. 1616 steps -- no meaningful difference).
+    SA_COOLING_RATE = 0.99995
+
     # 2. Algorithm Initialization
     softmin = SoftminEnergyAdagrad(
         n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
         initial_lr=lr, adaptive_lr=False, noise_intensity=noise_val,
-        bounds=bounds, noise="normal", beta_decay=None
-    )
-    softmin_decay = SoftminEnergyAdagrad(
-        n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
-        initial_lr=lr, adaptive_lr=False, noise_intensity=noise_val,
-        bounds=bounds, noise="normal", beta_decay=0.999
+        bounds=bounds, noise="normal", beta_decay=None, beta=SOFTMIN_BETA
     )
 
     sa = SimulatedAnnealing(
         n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
-        bounds=bounds, learning_rate=lr, cooling_rate=0.9999,
+        bounds=bounds, learning_rate=lr, cooling_rate=SA_COOLING_RATE,
         noise=noise_val, cooling_schedule="geometric", initial_temperature=10
     )
 
@@ -111,27 +130,15 @@ def worker_task(args):
         bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
     )
 
-    # Note: For Ackley, the notebook initializes fresh circle particles for each algorithm
-    if exp_name == 'ackley':
-        softmin.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-        softmin_decay.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-        sa.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-        cbo.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-        cbo_annealed.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-        pso.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-        standard_cbo.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-        standard_pso.reset(particle_init=initialize_on_circle(100, param, noise=0.1))
-
     # 3. Compute Entry/Exit Times
     t_softmin = softmin.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_softmin_decay = softmin_decay.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_sa = sa.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_cbo = cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_cbo_annealed = cbo_annealed.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_pso = pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_standard_cbo = standard_cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
     t_standard_pso = standard_pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    return (exp_name, param, seed, t_softmin, t_softmin_decay, t_sa, t_cbo, t_cbo_annealed,
+    return (exp_name, param, seed, t_softmin, t_sa, t_cbo, t_cbo_annealed,
             t_pso, t_standard_cbo, t_standard_pso)
 
 
@@ -160,8 +167,6 @@ if __name__ == '__main__':
     all_tasks.extend([('double_well', d, s) for d in range(1, 31) for s in range(100)])
     # 2. Quadruple Well (As 1 to 30)
     all_tasks.extend([('quadruple_well', a, s) for a in range(1, 31) for s in range(100)])
-    # 3. Ackley (radii 1 to 8)
-    all_tasks.extend([('ackley', r, s) for r in range(1, 9) for s in range(100)])
 
     run_resumable_pool(
         results_csv=RESULTS_CSV,
@@ -177,7 +182,7 @@ if __name__ == '__main__':
         results_csv=RESULTS_CSV,
         key_indices=[0, 1],       # experiment, parameter
         value_start=3,            # skip seed (index 2); values start at softmin
-        algo_names=['softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+        algo_names=['softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
                      'standard_cbo', 'standard_pso'],
         filename_fn=filename_for,
     )

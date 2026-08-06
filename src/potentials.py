@@ -263,6 +263,171 @@ def high_dim_ackley_function_setting(
     }
 
 
+# Cambridge Cluster Database (Wales & Doye, J. Phys. Chem. A 1997) literature global minima for
+# the standard 4*[r^-12 - r^-6] Lennard-Jones potential. These are ground truth -- never edit or
+# "recompute" them; `lennard_jones_cluster_setting`'s `e_global` and the end-to-end verification
+# check in the LJ driver both key off these exact values.
+#   N=38  is the canonical "hard" double-funnel case: the true global minimum is an fcc truncated
+#          octahedron, but a much larger basin of attraction leads to an easier icosahedral local
+#          funnel at E ~= -173.25 -- most local optimizers land there, not at -173.928427.
+#   N=75  (Marks decahedron) is also a known hard, multi-funnel case.
+LJ_GLOBAL_MINIMA: Dict[int, float] = {
+    13: -44.326801,
+    38: -173.928427,
+    55: -279.248470,
+    75: -397.492331,
+}
+
+
+def initialize_lj_cluster(
+    n_particles: int,
+    n_atoms: int,
+    radius: float = None,
+    min_dist: float = 0.9,
+    max_tries: int = 200,
+) -> np.ndarray:
+    """
+    Samples `n_particles` independent N-atom (N=`n_atoms`) starting configurations for the LJ
+    cluster potential, each atom drawn uniformly inside a ball of the given `radius` subject to
+    every pairwise distance being >= `min_dist`. Naive uniform-box sampling routinely places two
+    atoms nearly coincident; since the LJ potential scales as r^-12, that produces gradients of
+    order 1e6+ on the very first optimizer step. Mirrors `initialize_on_hypersphere`'s
+    normalize-then-scale idiom for the random direction, but with a random (not fixed) radius so
+    points fill the ball rather than just its surface.
+
+    Returns an (n_particles, 3*n_atoms) array, flattened to match the (n, d) shape every
+    `Simulation` subclass expects.
+    """
+    if radius is None:
+        radius = (n_atoms ** (1.0 / 3.0)) * 1.1 + 1.0
+
+    configs = np.empty((n_particles, n_atoms, 3))
+    for p in range(n_particles):
+        pts = np.empty((n_atoms, 3))
+        for i in range(n_atoms):
+            for _ in range(max_tries):
+                direction = np.random.randn(3)
+                direction /= np.linalg.norm(direction)
+                r = radius * np.random.uniform(0.0, 1.0) ** (1.0 / 3.0)
+                candidate = direction * r
+                if i == 0 or np.all(np.linalg.norm(pts[:i] - candidate, axis=1) >= min_dist):
+                    pts[i] = candidate
+                    break
+            else:
+                raise RuntimeError(
+                    f"initialize_lj_cluster: could not place atom {i}/{n_atoms} respecting "
+                    f"min_dist={min_dist} inside radius={radius} after {max_tries} tries -- "
+                    "increase radius or reduce min_dist."
+                )
+        configs[p] = pts
+    return configs.reshape(n_particles, n_atoms * 3)
+
+
+def lennard_jones_cluster_setting(
+    n_atoms: int,
+    container_radius: float = None,
+    container_strength: float = 10.0,
+    r2_floor: float = 0.09,
+    max_grad_norm: float = None,
+    box_pad: float = 2.0,
+) -> Dict[str, Any]:
+    """
+    N-atom (N=`n_atoms`) Lennard-Jones cluster energy minimization in R^3, d=3*n_atoms.
+    Hand-vectorized NumPy, following `high_dim_ackley_function_setting`'s pattern (sympy can't
+    express an N-atom pairwise sum, and `np.vectorize` would loop over particles in Python).
+
+    Energy: E(x) = sum_{i<j} 4*[r_ij^-12 - r_ij^-6], plus a confinement penalty (see below).
+    Gradient (closed form, no square roots -- 1/r folded into the exponent):
+        dE/dx_i = sum_{j != i} (24 r_ij^-8 - 48 r_ij^-14) (x_i - x_j)
+
+    `r2_floor` clamps r^2 away from 0 on the diagonal (self-pairs, where x_i - x_j = 0 exactly):
+    without it, r^2=0 raised to a negative power is inf, and inf * 0 is nan in the gradient sum.
+    Off-diagonal near-coincident pairs are also clamped as an extra safety net on top of
+    `initialize_lj_cluster`'s min-distance rejection.
+
+    Confinement term (prevents "evaporation": atoms drifting to zero-gradient regions under SDE
+    noise and never returning): E_conf(X) = container_strength * sum_i max(0, |x_i| - R_c)^2,
+    origin-centered on purpose -- it's separable per atom, pins the cluster (removing the
+    translational zero mode), and is exactly zero on the reference global minimum once centered
+    inside R_c. Don't "fix" this to be centroid-relative -- that adds complexity for no benefit
+    here.
+    """
+    d = 3 * n_atoms
+    if container_radius is None:
+        # Generous default: comfortably outside the equilibrium cluster radius (~O(N^(1/3)) atoms
+        # near touching distance) for every N in LJ_GLOBAL_MINIMA; not performance-critical, just
+        # needs to not clip the relaxed cluster.
+        container_radius = 1.5 * (n_atoms ** (1.0 / 3.0)) + 1.5
+    R_c = container_radius
+
+    eye = np.eye(n_atoms, dtype=bool)
+
+    def f_vec(x: np.ndarray) -> np.ndarray:
+        n = x.shape[0]
+        pos = x.reshape(n, n_atoms, 3)
+        diff = pos[:, :, None, :] - pos[:, None, :, :]          # diff[:, i, j] = x_i - x_j
+        r2 = np.maximum(np.sum(diff ** 2, axis=-1), r2_floor)   # (n, N, N)
+        r6 = r2 ** -3
+        pair_energy = 4.0 * (r6 ** 2 - r6)
+        pair_energy = np.where(eye[None, :, :], 0.0, pair_energy)
+        e_lj = 0.5 * np.sum(pair_energy, axis=(1, 2))           # 0.5: each pair counted twice
+
+        r_atom = np.linalg.norm(pos, axis=-1)                   # (n, N)
+        excess = np.maximum(0.0, r_atom - R_c)
+        e_conf = container_strength * np.sum(excess ** 2, axis=-1)
+
+        return e_lj + e_conf
+
+    def f_grad_vec(x: np.ndarray) -> np.ndarray:
+        n = x.shape[0]
+        pos = x.reshape(n, n_atoms, 3)
+        diff = pos[:, :, None, :] - pos[:, None, :, :]          # diff[:, i, j] = x_i - x_j
+        r2 = np.maximum(np.sum(diff ** 2, axis=-1), r2_floor)   # (n, N, N)
+        coeff = 24.0 * r2 ** -4 - 48.0 * r2 ** -7
+        # No explicit diagonal mask needed here: diff[:, i, i] is exactly the zero vector, so
+        # coeff * diff is zero at i==j regardless of the (finite, r2_floor-clamped) coeff value.
+        grad_lj = np.sum(coeff[..., None] * diff, axis=2)       # sum over j -> (n, N, 3)
+
+        # Clip only the LJ term, per atom (n, N, 1), BEFORE adding confinement -- not the
+        # combined gradient. Confinement's restoring pull (2*container_strength*excess) needs to
+        # scale up freely with however far an atom has escaped; capping it at the same ceiling as
+        # the near-singular r^-13 LJ term would leave a runaway atom with no way back in, turning
+        # a transient excursion into a permanent one.
+        if max_grad_norm is not None:
+            lj_norms = np.linalg.norm(grad_lj, axis=-1, keepdims=True)  # (n, N, 1)
+            scale = np.minimum(1.0, max_grad_norm / np.maximum(lj_norms, 1e-12))
+            grad_lj = grad_lj * scale
+
+        r_atom = np.linalg.norm(pos, axis=-1, keepdims=True)    # (n, N, 1)
+        r_atom_safe = np.where(r_atom == 0.0, 1e-12, r_atom)
+        excess = np.maximum(0.0, r_atom - R_c)
+        grad_conf = 2.0 * container_strength * excess * (pos / r_atom_safe)
+
+        return (grad_lj + grad_conf).reshape(n, d)
+
+    bound_extent = R_c + box_pad
+    bounds = [[-bound_extent, bound_extent]] * d
+
+    def particle_init_fn(n: int) -> np.ndarray:
+        return initialize_lj_cluster(n_particles=n, n_atoms=n_atoms)
+
+    return {
+        'f_vec': f_vec,
+        'f_grad_vec': f_grad_vec,
+        'particle_init': bounds,
+        # No coordinate-space target set: the global minimum is degenerate under O(3) rotation x
+        # N! atom-permutation symmetry, so no small axis-aligned box captures "this is *a* copy of
+        # the global minimum". Value-space (Simulation.first_value_time) is the only well-defined
+        # target for this benchmark.
+        'set': None,
+        'bounds': bounds,
+        'particle_init_fn': particle_init_fn,
+        'd': d,
+        'n_atoms': n_atoms,
+        'e_global': LJ_GLOBAL_MINIMA.get(n_atoms),
+    }
+
+
 def initialize_on_circle(n, radius, noise=0.1):
     """
     Initialize n particles on a circle of given radius, with some noise

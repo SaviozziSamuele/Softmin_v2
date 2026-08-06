@@ -5,6 +5,8 @@ Contains:
     deduplicated across the 1D/2D/>2D and static/gif variants.
   - `plot_entry_time_comparison`: the shared "mean entry time vs. parameter" errorbar plot
     used by the double-well, quadruple-well, and Ackley comparison figures in the notebook.
+  - `plot_value_comparison`: the value-space analogue (mean +/- IQR of a value-space metric vs.
+    parameter, e.g. quenched Lennard-Jones energy gap or re-evaluated RL return).
 """
 import os
 import pickle as pkl
@@ -228,6 +230,52 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         mask = np.ones(x.shape, dtype=bool) if mask_below is None else means < mask_below
 
         ax.errorbar(x[mask], means[mask], yerr=err[:, mask], label=s['label'],
+                    marker=s.get('marker', 'o'), color=s.get('color'), capsize=5, linestyle='-')
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if yscale:
+        ax.set_yscale(yscale)
+    if grid:
+        ax.grid()
+    ax.legend()
+    return fig, ax
+
+
+def plot_value_comparison(x, results_dir, series, xlabel, ylabel="Value", title="",
+                           yscale=None, grid=False, figsize=(10, 6), params=None,
+                           value_transform=None):
+    """Plot mean (+/- IQR) of a value-space metric (e.g. quenched Lennard-Jones energy gap,
+    re-evaluated RL return) vs. a swept parameter for several methods.
+
+    Structurally identical to `plot_entry_time_comparison` (same .pkl-per-(algorithm, parameter)
+    convention, same asymmetric-IQR errorbars, same `series`/`params` shape) but without that
+    function's entry-time-specific defaults (no forced log-scale y-axis, no `mask_below` timeout
+    cutoff), and with an optional `value_transform(values, p) -> values` hook applied to each
+    loaded array before its mean/IQR are computed -- e.g. subtracting a parameter-dependent
+    literature reference (`LJ_GLOBAL_MINIMA[p]`) to turn raw quenched energies into gaps.
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+    x = np.asarray(x)
+    params = x if params is None else list(params)
+
+    for s in series:
+        means, q1s, q3s = [], [], []
+        for p in params:
+            filename = os.path.join(results_dir, s['filename_template'].format(p=p))
+            with open(filename, "rb") as f:
+                values = pkl.load(f)
+            if value_transform is not None:
+                values = value_transform(values, p)
+            means.append(np.mean(values))
+            q1s.append(np.percentile(values, 25))
+            q3s.append(np.percentile(values, 75))
+
+        means = np.asarray(means, dtype=float)
+        err = _asymmetric_errorbars(means, q1s, q3s)
+
+        ax.errorbar(x, means, yerr=err, label=s['label'],
                     marker=s.get('marker', 'o'), color=s.get('color'), capsize=5, linestyle='-')
 
     ax.set_xlabel(xlabel)
