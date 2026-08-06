@@ -6,8 +6,10 @@ from experiments import run_resumable_pool
 from potentials import asymmetric_double_well
 from simulations import SoftminEnergyAdagrad
 
-job_id = os.environ.get("SLURM_JOB_ID", "local")
-RESULTS_CSV = f'results/master_convergence_diagnostics_{job_id}.csv'
+# Fixed filename (2026-08-06), matching every other driver's convention -- see
+# run_experiments_resumable.py's HEADER comment for why job-ID-keying never actually provided
+# real crash-resumability.
+RESULTS_CSV = 'results/master_convergence_diagnostics.csv'
 
 # Freidlin-Wentzell exit-time theory (paper/SoftMin_revised_theory.tex, Theorem 3.1 / Cor.
 # exit-time-conditional) is an asymptotic (sigma -> 0), conditional statement:
@@ -42,7 +44,17 @@ SEEDS = range(100)
 # this ceiling regardless of how large it is set.
 T_MAX = 20_000.0
 
-HEADER = ['sweep', 'delta', 'sigma', 'lr', 'n', 'seed', 'tau']
+# abort_on_stagnation is explicitly OFF here (2026-08-06) -- same reasoning as
+# run_theory_verification.py (which shares this driver's beta=2.0 / low-noise regime), sharpened
+# further by this driver's own SIGMA_VALUES/LR_VALUES sweeping toward the sigma->0 asymptotic
+# limit the underlying theory is actually about: escape here is a genuine rare-event waiting
+# process, not continuous improvement, so a short stagnation patience would systematically
+# truncate exactly the long, quiet-then-sudden-crossing trajectories this sweep exists to
+# characterize. Position-collapse abort (the ceiling this file's own comment above already
+# documents relying on) is unaffected and stays on.
+ABORT_ON_STAGNATION = False
+
+HEADER = ['sweep', 'delta', 'sigma', 'lr', 'n', 'seed', 'tau', 'status']
 
 
 def worker_task(args):
@@ -63,9 +75,11 @@ def worker_task(args):
         initial_lr=lr, adaptive_lr=False, noise_intensity=sigma, beta=BETA,
         noise="normal", bounds=setting['bounds'], beta_decay=None,
     )
-    tau = sim.first_entry_time(target_set=setting['set'], max_steps=max_steps)
+    tau = sim.first_entry_time(
+        target_set=setting['set'], max_steps=max_steps, abort_on_stagnation=ABORT_ON_STAGNATION,
+    )
 
-    return (sweep, delta, sigma, lr, n, seed, tau)
+    return (sweep, delta, sigma, lr, n, seed, tau, sim._last_stop_reason)
 
 
 def task_key(t):
@@ -74,7 +88,7 @@ def task_key(t):
 
 
 def row_key(row):
-    sweep, delta, sigma, lr, n, seed, tau = row
+    sweep, delta, sigma, lr, n, seed, tau, status = row
     return (sweep, float(delta), float(sigma), float(lr), int(n), int(seed))
 
 

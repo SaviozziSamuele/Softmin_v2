@@ -6,8 +6,11 @@ from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv
 from potentials import one_dimensional_double_well
 from simulations import SoftminEnergyAdagrad
 
-job_id = os.environ.get("SLURM_JOB_ID", "local")
-RESULTS_CSV = f'results/master_ablation_log_{job_id}.csv'
+# Fixed filename (2026-08-06), matching every other driver's convention -- was previously the
+# only remaining driver still keyed by SLURM_JOB_ID, an oversight from the earlier session's
+# switch (see run_experiments_resumable.py's HEADER comment for why job-ID-keying never actually
+# provided real crash-resumability).
+RESULTS_CSV = 'results/master_ablation_log.csv'
 MAX_STEPS = 2_000_000_000
 
 # Mechanism ablation (per paper/SoftMin_revised_theory.tex's numerical-experiments placeholder):
@@ -16,7 +19,11 @@ MAX_STEPS = 2_000_000_000
 # This is a separate, standalone study -- not part of the Softmin-vs-SA-vs-CBO-vs-PSO comparison.
 PREFACTOR_MODES = ['signed', 'positive_part', 'absolute']
 
-HEADER = ['parameter', 'seed'] + PREFACTOR_MODES
+# Status columns (2026-08-06): trailing block, one per prefactor mode, recording each sim's honest
+# self._last_stop_reason -- see run_experiments_resumable.py's HEADER comment for the full
+# rationale. No CBO/PSO here (softmin-only ablation), but the same mechanism applies uniformly and
+# is worth the same audit trail.
+HEADER = ['parameter', 'seed'] + PREFACTOR_MODES + [f'{m}_status' for m in PREFACTOR_MODES]
 
 
 def worker_task(args):
@@ -47,6 +54,7 @@ def worker_task(args):
     beta = 10.0
 
     entry_times = []
+    statuses = []
     for mode in PREFACTOR_MODES:
         softmin_variant = SoftminEnergyAdagrad(
             n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init,
@@ -54,8 +62,9 @@ def worker_task(args):
             bounds=bounds, noise="normal", beta_decay=None, prefactor_mode=mode, beta=beta
         )
         entry_times.append(softmin_variant.first_entry_time(target_set=set_, max_steps=MAX_STEPS))
+        statuses.append(softmin_variant._last_stop_reason)
 
-    return (param, seed, *entry_times)
+    return (param, seed, *entry_times, *statuses)
 
 
 def task_key(t):

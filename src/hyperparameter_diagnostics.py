@@ -19,7 +19,9 @@ from potentials import (
     unbalanced_quadruple_well_setting,
     high_dim_ackley_function_setting,
 )
-from simulations import SoftminEnergyAdagrad, SimulatedAnnealing, GradientAwareCBO
+from simulations import (
+    SoftminEnergyAdagrad, SimulatedAnnealing, GradientAwareCBO, GradientAwarePSO, CBO, PSO,
+)
 
 # beta=10.0 is the value actually shipped in every production driver (run_experiments_resumable.py,
 # run_ackley_dimensions.py, run_ablation_experiment.py, run_lennard_jones.py). It was reached in
@@ -181,6 +183,77 @@ def escape_time_validation(f_vec, f_grad_vec, d, bounds, particle_init, target_s
 
 
 # ---------------------------------------------------------------------------
+# Early-stop mechanism validation -- is Simulation._check_early_stop itself trustworthy?
+# ---------------------------------------------------------------------------
+
+def stagnation_check_validation(f_vec, f_grad_vec, d, bounds, particle_init, target_set,
+                                 sim_factories, probe_max_steps=50_000, seed=42,
+                                 stagnation_patience=5, stagnation_rtol=1e-4,
+                                 stagnation_atol=1e-8, early_stop_check_interval=1000):
+    """Validates the early-stop mechanism (2026-08-06, added after CBO/PSO were found to either
+    abort near-instantly via position collapse or, worse for PSO, never abort at all and grind the
+    real max_steps budget -- see Remark on CBO/PSO exclusion in the paper) against independent
+    ground truth, not by re-invoking the same abort logic being validated.
+
+    For each (name, factory) in `sim_factories`: runs once with both mechanisms enabled (the real,
+    deployed `first_entry_time` call) and once with a raw, never-aborting manual step loop up to
+    the same `probe_max_steps`, recording `best_global_value` at every `early_stop_check_interval`.
+    If the enabled run aborted at step S, checks whether the disabled run's `best_global_value`
+    ever improved (beyond `stagnation_rtol`/`stagnation_atol`) at any checkpoint after S -- if so,
+    the abort likely cut off real progress (a false positive, the failure mode this function exists
+    to catch); if not, nothing was lost by stopping early.
+    """
+    lower = np.array([s[0] for s in target_set])
+    upper = np.array([s[1] for s in target_set])
+    report = {}
+
+    for name, factory in sim_factories.items():
+        np.random.seed(seed)
+        sim_on = factory()
+        t_on = sim_on.first_entry_time(
+            target_set=target_set, max_steps=probe_max_steps,
+            stagnation_patience=stagnation_patience, stagnation_rtol=stagnation_rtol,
+            stagnation_atol=stagnation_atol, early_stop_check_interval=early_stop_check_interval,
+        )
+        reason_on, step_on = sim_on._last_stop_reason, sim_on._last_stop_step
+
+        np.random.seed(seed)
+        sim_off = factory()
+        checkpoints, best_history = [], []
+        target_reached_step = None
+        for i in range(probe_max_steps):
+            sim_off.n_steps = i + 1
+            sim_off.step()
+            if target_reached_step is None:
+                in_bounds = np.all((sim_off.particles > lower) & (sim_off.particles < upper), axis=1)
+                if np.any(in_bounds):
+                    target_reached_step = i
+            if i % early_stop_check_interval == 0:
+                checkpoints.append(i)
+                best_history.append(float(sim_off.best_global_value))
+        checkpoints = np.array(checkpoints)
+        best_history = np.array(best_history)
+
+        improved_after_abort = None
+        if reason_on in ('position_collapse', 'value_stagnation'):
+            before_mask = checkpoints <= step_on
+            at_abort = best_history[before_mask][-1] if np.any(before_mask) else best_history[0]
+            after = best_history[checkpoints > step_on]
+            improved_after_abort = bool(after.size and np.any(
+                (after < at_abort) & ~np.isclose(
+                    after, at_abort, rtol=stagnation_rtol, atol=stagnation_atol
+                )
+            ))
+
+        report[name] = {
+            'enabled_reason': reason_on, 'enabled_step': step_on, 'enabled_time': t_on,
+            'uncapped_target_reached_step': target_reached_step,
+            'improved_after_abort_in_uncapped_run': improved_after_abort,
+        }
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Generic stability probe (lr sanity check; also usable for PSO/w/c1/c2)
 # ---------------------------------------------------------------------------
 
@@ -305,6 +378,35 @@ if __name__ == '__main__':
         consensus_rate=1.0, noise_intensity=np.sqrt(2.0),
     ).items():
         print(f"  beta={beta:>6}: median_ess_frac={stats['median_ess_frac']:.3f}")
+
+    print("\n" + "=" * 70)
+    print("EARLY-STOP MECHANISM VALIDATION (quadruple well, A=15 mid-sweep)")
+    print("=" * 70)
+    qw2 = unbalanced_quadruple_well_setting(A=15, delta=-1)
+
+    def _factory(cls, **kwargs):
+        return lambda: cls(n=100, d=2, f=qw2['f_vec'], df=qw2['f_grad_vec'], bounds=qw2['bounds'],
+                            particle_init=qw2['particle_init'], learning_rate=LR, **kwargs)
+
+    sim_factories = {
+        'pso': _factory(PSO, w=0.729, c1=1.49445, c2=1.49445),
+        'cbo': _factory(CBO, consensus_rate=1.0, noise_intensity=1.0, beta=CHOSEN_BETA),
+        'gradient_aware_pso': _factory(GradientAwarePSO, w=0.729, c1=1.49445, c2=1.49445),
+        'gradient_aware_cbo': _factory(GradientAwareCBO, consensus_rate=1.0,
+                                        noise_intensity=np.sqrt(2.0), beta=CHOSEN_BETA),
+        'softmin': lambda: SoftminEnergyAdagrad(
+            n=100, d=2, f=qw2['f_vec'], df=qw2['f_grad_vec'], bounds=qw2['bounds'],
+            particle_init=qw2['particle_init'], initial_lr=LR, adaptive_lr=False,
+            noise_intensity=1.0, noise="normal", beta_decay=None, beta=CHOSEN_BETA,
+        ),
+    }
+    for name, stats in stagnation_check_validation(
+        qw2['f_vec'], qw2['f_grad_vec'], 2, qw2['bounds'], qw2['particle_init'], qw2['set'],
+        sim_factories,
+    ).items():
+        print(f"  {name:>20}: reason={stats['enabled_reason']:<18} step={stats['enabled_step']:<7} "
+              f"uncapped_target_reached_step={stats['uncapped_target_reached_step']} "
+              f"improved_after_abort={stats['improved_after_abort_in_uncapped_run']}")
 
     print("\n" + "=" * 70)
     print(f"CHOSEN: beta={CHOSEN_BETA} (fixed, no schedule) for all three benchmarks above, plus")

@@ -109,6 +109,12 @@ class Simulation(ABC):
         self.noise = None
         self.history_eq_values = None
 
+        # Honest record of why the last first_entry_time/first_value_time call stopped --
+        # 'target_reached' / 'position_collapse' / 'value_stagnation' / 'max_steps_exhausted'.
+        # Each call sets these fresh at every return point, so callers don't need to reset() first.
+        self._last_stop_reason = None
+        self._last_stop_step = None
+
         # Computational-cost instrumentation: evaluation counts (the fair cost currency across
         # gradient-based and gradient-free methods, per the paper's cost-matched-comparison
         # requirement) plus a secondary, implementation-level wall-clock signal. Only step()-time
@@ -149,9 +155,70 @@ class Simulation(ABC):
         self.wall_clock_seconds += time.perf_counter() - start_time
         logger.info("Simulation completed.")
 
-    def first_entry_time(self, target_set: List[List[float]], max_steps: int = 10_000) -> float:
+    def _check_early_stop(
+        self,
+        abort_on_collapse: bool,
+        abort_on_stagnation: bool,
+        stagnation_patience: int,
+        stagnation_rtol: float,
+        stagnation_atol: float,
+        stagnation_state: dict,
+    ) -> Optional[str]:
+        """Checks both early-stop mechanisms at a checkpoint step; returns the stop reason
+        ('position_collapse' or 'value_stagnation') if either fires, else None.
+
+        `position_collapse`: the whole swarm has physically collapsed to a single point (e.g.
+        CBO's consensus dynamics, whose diffusion noise vanishes as particles approach consensus).
+        `value_stagnation`: `self.best_global_value` hasn't improved beyond tolerance in
+        `stagnation_patience` consecutive checks -- catches a swarm that has stopped making
+        progress WITHOUT collapsing to a point (e.g. PSO: once velocity decays to ~0, particles
+        freeze at their individual last positions, which can stay spread out indefinitely).
+        `best_global_value` is monotonically non-increasing by construction in every subclass, so
+        "improved" reduces to a single one-directional np.isclose check -- a flat reading can never
+        be an artifact of noise pushing the value back up.
+
+        `stagnation_state` is a plain dict owned by the caller (not `self`), holding
+        {'reference_value', 'stale_checkpoints'} across checkpoints, so nested step()-driving loops
+        elsewhere can't collide with it.
+        """
+        if abort_on_collapse and np.max(np.std(self.particles, axis=0)) < 1e-6:
+            return "position_collapse"
+
+        if abort_on_stagnation:
+            current = self.best_global_value
+            reference = stagnation_state.get('reference_value')
+            if reference is None or not np.isclose(
+                current, reference, rtol=stagnation_rtol, atol=stagnation_atol
+            ):
+                stagnation_state['reference_value'] = current
+                stagnation_state['stale_checkpoints'] = 0
+            else:
+                stagnation_state['stale_checkpoints'] += 1
+                if stagnation_state['stale_checkpoints'] >= stagnation_patience:
+                    return "value_stagnation"
+
+        return None
+
+    def first_entry_time(
+        self,
+        target_set: List[List[float]],
+        max_steps: int = 10_000,
+        abort_on_collapse: bool = True,
+        abort_on_stagnation: bool = True,
+        stagnation_patience: int = 5,
+        stagnation_rtol: float = 1e-4,
+        stagnation_atol: float = 1e-8,
+        early_stop_check_interval: int = 1000,
+    ) -> float:
         """
         Computes the first entry time into a target region using fully vectorized checks.
+
+        `abort_on_collapse`/`abort_on_stagnation` end the run early once the swarm has provably
+        stopped making progress, instead of burning the rest of `max_steps` for nothing -- see
+        `_check_early_stop` for what each one catches. Either returns the same sentinel as a real
+        timeout (`max_steps * learning_rate`); check `self._last_stop_reason` /
+        `self._last_stop_step` afterward to tell "reached", "collapsed", "stagnated", and "ran the
+        full budget" apart -- the bare float alone can't distinguish them.
         """
         if len(target_set) != self.d or not all(len(s) == 2 and s[0] < s[1] for s in target_set):
             raise ValueError("target_set constraints must match dimensions and be strictly formatted as [[min, max], ...]")
@@ -159,6 +226,7 @@ class Simulation(ABC):
         # Pre-allocate numpy arrays for rapid broadcast comparisons
         lower_bounds = np.array([s[0] for s in target_set])
         upper_bounds = np.array([s[1] for s in target_set])
+        stagnation_state: dict = {}
 
         start_time = time.perf_counter()
         for i in range(max_steps):
@@ -174,16 +242,22 @@ class Simulation(ABC):
             if np.any(in_bounds):
                 logger.info(f"Entry set reached at step {i}.")
                 self.wall_clock_seconds += time.perf_counter() - start_time
+                self._last_stop_reason, self._last_stop_step = "target_reached", i
                 return i * self.learning_rate
-            if i % 1000 == 0:
-                # If the max standard deviation across all spatial dimensions is functionally zero
-                if np.max(np.std(self.particles, axis=0)) < 1e-6:
-                    # The swarm is permanently trapped. Abort the simulation to save CPU time.
+            if i % early_stop_check_interval == 0:
+                reason = self._check_early_stop(
+                    abort_on_collapse, abort_on_stagnation, stagnation_patience,
+                    stagnation_rtol, stagnation_atol, stagnation_state,
+                )
+                if reason is not None:
+                    logger.info(f"Early stop ({reason}) at step {i}; swarm is not going to reach the target.")
                     self.wall_clock_seconds += time.perf_counter() - start_time
+                    self._last_stop_reason, self._last_stop_step = reason, i
                     return max_steps * self.learning_rate
 
         self.wall_clock_seconds += time.perf_counter() - start_time
         logger.warning(f"Maximum steps ({max_steps}) reached without entering target set.")
+        self._last_stop_reason, self._last_stop_step = "max_steps_exhausted", max_steps
         return max_steps * self.learning_rate
 
     def first_value_time(
@@ -192,6 +266,11 @@ class Simulation(ABC):
         max_steps: int = 10_000,
         abort_on_collapse: bool = True,
         checkpoints: Optional[List[int]] = None,
+        abort_on_stagnation: bool = True,
+        stagnation_patience: int = 5,
+        stagnation_rtol: float = 1e-4,
+        stagnation_atol: float = 1e-8,
+        early_stop_check_interval: int = 1000,
     ) -> float:
         """
         Value-space analogue of `first_entry_time`: returns the first step at which
@@ -201,9 +280,11 @@ class Simulation(ABC):
         permutation, ...), so no small coordinate-space box can capture "this is *a* copy of the
         global minimum" -- only the objective value is well-defined as a target.
 
-        `abort_on_collapse` mirrors `first_entry_time`'s trapped-swarm check but is exposed rather
-        than hardcoded True: in some settings (e.g. an RL objective) a collapsed ensemble can mean
-        *success* -- every particle converged to the same good policy -- not failure.
+        `abort_on_collapse`/`abort_on_stagnation` are exposed rather than hardcoded True: in some
+        settings (e.g. an RL objective) a collapsed ensemble or a value plateau can mean *success*
+        -- every particle converged to the same good policy -- not failure. See
+        `_check_early_stop` for what each one catches; `self._last_stop_reason` /
+        `self._last_stop_step` record which one fired (if any).
 
         If `checkpoints` is given (a sequence of step indices), `self.best_global_value` is
         recorded at each of those steps into `self.value_checkpoints` (a dict step -> value), for
@@ -212,6 +293,7 @@ class Simulation(ABC):
         checkpoint_set = set(checkpoints) if checkpoints is not None else None
         if checkpoint_set is not None:
             self.value_checkpoints = {}
+        stagnation_state: dict = {}
 
         start_time = time.perf_counter()
         for i in range(max_steps):
@@ -228,17 +310,23 @@ class Simulation(ABC):
             if np.isfinite(self.best_global_value) and self.best_global_value <= target_value:
                 logger.info(f"Target value reached at step {i}.")
                 self.wall_clock_seconds += time.perf_counter() - start_time
+                self._last_stop_reason, self._last_stop_step = "target_reached", i
                 return i * self.learning_rate
 
-            if abort_on_collapse and i % 1000 == 0:
-                # If the max standard deviation across all spatial dimensions is functionally zero
-                if np.max(np.std(self.particles, axis=0)) < 1e-6:
-                    # The swarm is permanently trapped. Abort the simulation to save CPU time.
+            if i % early_stop_check_interval == 0:
+                reason = self._check_early_stop(
+                    abort_on_collapse, abort_on_stagnation, stagnation_patience,
+                    stagnation_rtol, stagnation_atol, stagnation_state,
+                )
+                if reason is not None:
+                    logger.info(f"Early stop ({reason}) at step {i}; swarm is not going to reach the target.")
                     self.wall_clock_seconds += time.perf_counter() - start_time
+                    self._last_stop_reason, self._last_stop_step = reason, i
                     return max_steps * self.learning_rate
 
         self.wall_clock_seconds += time.perf_counter() - start_time
         logger.warning(f"Maximum steps ({max_steps}) reached without reaching target value.")
+        self._last_stop_reason, self._last_stop_step = "max_steps_exhausted", max_steps
         return max_steps * self.learning_rate
 
     def reset(self, particle_init: Optional[Union[List, np.ndarray]] = None) -> None:
@@ -688,6 +776,7 @@ class GradientAwareCBO(Simulation):
         noise_intensity: float = np.sqrt(2), # sigma: Diffusion scaling
         beta: float = 10.0,                  # beta: Temperature inverse for consensus
         beta_growth: Optional[float] = None, # optional annealing: beta *= beta_growth each step
+        beta_max: Optional[float] = 1e6,     # cap on beta_growth's compounding -- see step()
         name: str = "GradientAwareCBO"
     ):
         if bounds is None:
@@ -709,11 +798,14 @@ class GradientAwareCBO(Simulation):
         if beta_growth is not None and beta_growth <= 1:
             raise ValueError("beta_growth must be > 1 (CBO's temperature is annealed upward, "
                               "the opposite direction from Softmin's decaying beta).")
+        if beta_max is not None and beta_max <= 0:
+            raise ValueError("beta_max must be strictly positive.")
 
         self.consensus_rate = consensus_rate
         self.noise_intensity = noise_intensity
         self.beta = float(beta)
         self.beta_growth = beta_growth
+        self.beta_max = beta_max
 
         # PRE-ALLOCATION: Cache bounds and compute static scalars
         self._lower_bounds = np.array([b[0] for b in self.bounds])
@@ -781,9 +873,19 @@ class GradientAwareCBO(Simulation):
             self.best_global_position = self.particles[current_min_idx].copy()
 
         # 9. Optional temperature annealing (standard CBO practice anneals beta upward, sharpening
-        # consensus over time -- the opposite direction from Softmin's decaying beta)
+        # consensus over time -- the opposite direction from Softmin's decaying beta). Capped at
+        # beta_max (2026-08-06): uncapped compounding overflows self.beta to inf within realistic
+        # step budgets (e.g. ~710,000 steps at beta_growth=1.001, well inside MAX_STEPS=2e9 or
+        # even 1e7) -- and once beta is inf, the *current best* particle's own weight computes
+        # exp(-inf * 0.0) = nan (its (values - min_val) term is exactly 0), corrupting the whole
+        # consensus point, not just saturating it. 1e6 is already far past where the softmax has
+        # sharpened to a near-hard argmin (beta~50-100 already saturates it, per the softmin
+        # escape-time validation in hyperparameter_diagnostics.py), so the cap never constrains
+        # real annealing -- it only prevents the numerically meaningless tail beyond saturation.
         if self.beta_growth is not None:
             self.beta *= self.beta_growth
+            if self.beta_max is not None:
+                self.beta = min(self.beta, self.beta_max)
 
 
 class GradientAwarePSO(Simulation):
@@ -896,6 +998,7 @@ class CBO(Simulation):
         noise_intensity: float = 1.0,         # sigma: diffusion scaling (2*lambda > sigma**2 for stability)
         beta: float = 10.0,                   # beta: temperature inverse for consensus
         beta_growth: Optional[float] = None,  # optional annealing: beta *= beta_growth each step
+        beta_max: Optional[float] = 1e6,      # cap on beta_growth's compounding -- see step()
         name: str = "CBO"
     ):
         if bounds is None:
@@ -916,11 +1019,14 @@ class CBO(Simulation):
             raise ValueError("Consensus rate, noise intensity, and beta must be strictly positive.")
         if beta_growth is not None and beta_growth <= 1:
             raise ValueError("beta_growth must be > 1 (CBO's temperature is annealed upward).")
+        if beta_max is not None and beta_max <= 0:
+            raise ValueError("beta_max must be strictly positive.")
 
         self.consensus_rate = consensus_rate
         self.noise_intensity = noise_intensity
         self.beta = float(beta)
         self.beta_growth = beta_growth
+        self.beta_max = beta_max
 
         # PRE-ALLOCATION: Cache bounds and compute static scalars
         self._lower_bounds = np.array([b[0] for b in self.bounds])
@@ -970,9 +1076,15 @@ class CBO(Simulation):
             self.best_global_value = self.values[current_min_idx]
             self.best_global_position = self.particles[current_min_idx].copy()
 
-        # 10. Optional temperature annealing (standard CBO practice: anneal beta upward)
+        # 10. Optional temperature annealing (standard CBO practice: anneal beta upward). Capped
+        # at beta_max -- see the matching comment in GradientAwareCBO.step() for why uncapped
+        # compounding is a real correctness bug (not just an inconvenience), not only a numerical
+        # nuisance: once self.beta overflows to inf, exp(-inf * 0.0) = nan for whatever particle is
+        # exactly at the current best, corrupting the consensus point.
         if self.beta_growth is not None:
             self.beta *= self.beta_growth
+            if self.beta_max is not None:
+                self.beta = min(self.beta, self.beta_max)
 
 
 class PSO(Simulation):

@@ -46,16 +46,22 @@ CBO_BETA_GROWTH = 1.001
 N_ATOMS_LIST = [13, 38, 55, 75]
 SEEDS = range(30)  # LJ is O(N^2)/step vs. Ackley's O(d); fewer seeds are affordable.
 
+ALGO_NAMES = ['softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+              'standard_cbo', 'standard_pso']
+
+# Status columns (2026-08-06): third trailing block, one per algorithm, recording each sim's
+# honest self._last_stop_reason -- see run_experiments_resumable.py's HEADER comment for the full
+# rationale. Appended after both the _t and _e blocks, so the existing zip-truncation trick this
+# file already relies on (see the reconstruct_pkl_files_from_csv calls below) keeps working
+# unmodified for both of them.
 HEADER = [
     'n_atoms', 'seed',
     'softmin_t', 'softmin_decay_t', 'sa_t', 'cbo_t', 'cbo_annealed_t', 'pso_t',
     'standard_cbo_t', 'standard_pso_t',
     'softmin_e', 'softmin_decay_e', 'sa_e', 'cbo_e', 'cbo_annealed_e', 'pso_e',
     'standard_cbo_e', 'standard_pso_e',
+    *(f'{a}_status' for a in ALGO_NAMES),
 ]
-
-ALGO_NAMES = ['softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
-              'standard_cbo', 'standard_pso']
 
 FILENAME_BY_ALGO_T = {a: f"results/{a}_t_lennard_jones_n{{n_atoms}}.pkl" for a in ALGO_NAMES}
 FILENAME_BY_ALGO_E = {a: f"results/{a}_e_lennard_jones_n{{n_atoms}}.pkl" for a in ALGO_NAMES}
@@ -163,16 +169,20 @@ def worker_task(args):
     for sim in algos.values():
         sim.reset(particle_init=x0)
 
-    # 4. Run + quench every algorithm
+    # 4. Run + quench every algorithm. Status is read from self._last_stop_reason right after the
+    # first_value_time call (see run_experiments_resumable.py for the full rationale).
     hit_times = {}
     quenched_energies = {}
+    statuses = {}
     for name, sim in algos.items():
         hit_times[name] = sim.first_value_time(target_value=target, max_steps=MAX_STEPS)
         quenched_energies[name] = _quench(quench_setting, sim.best_global_position)
+        statuses[name] = sim._last_stop_reason
 
     return (n_atoms, seed,
             *(hit_times[a] for a in ALGO_NAMES),
-            *(quenched_energies[a] for a in ALGO_NAMES))
+            *(quenched_energies[a] for a in ALGO_NAMES),
+            *(statuses[a] for a in ALGO_NAMES))
 
 
 def task_key(t):

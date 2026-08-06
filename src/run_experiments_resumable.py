@@ -36,10 +36,20 @@ CBO_BETA_GROWTH = 1.001
 # rem:higher-dim and Appendix hyperparameters section. Continuing to run the full decaying-beta
 # sweep at MAX_STEPS=2e9 would roughly double softmin's compute cost for a result already settled
 # by the single-example comparison; that comparison is reported directly in the paper instead.
+ALGO_NAMES = ['softmin', 'sa', 'cbo', 'cbo_annealed', 'pso', 'standard_cbo', 'standard_pso']
+
+# Status columns (2026-08-06): trailing block, one per algorithm, appended after all the time
+# columns above -- records each sim's honest self._last_stop_reason ('target_reached' /
+# 'position_collapse' / 'value_stagnation' / 'max_steps_exhausted') so a genuine hit can be told
+# apart from an early-stopped run from the CSV alone, instead of the numeric time column being the
+# only record (which can't distinguish them -- both a real max_steps run and an aborted one return
+# the identical max_steps*lr sentinel). See Simulation._check_early_stop in simulations.py: this
+# is what replaced the old, undisclosed position-collapse-only abort that silently mislabeled most
+# of CBO/PSO's quadruple-well results as if they'd been run to the real budget.
 HEADER = [
     'experiment', 'parameter', 'seed',
-    'softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
-    'standard_cbo', 'standard_pso',
+    *ALGO_NAMES,
+    *(f'{a}_status' for a in ALGO_NAMES),
 ]
 
 
@@ -130,16 +140,22 @@ def worker_task(args):
         bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
     )
 
-    # 3. Compute Entry/Exit Times
-    t_softmin = softmin.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_sa = sa.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_cbo = cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_cbo_annealed = cbo_annealed.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_pso = pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_standard_cbo = standard_cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_standard_pso = standard_pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    return (exp_name, param, seed, t_softmin, t_sa, t_cbo, t_cbo_annealed,
-            t_pso, t_standard_cbo, t_standard_pso)
+    # 3. Compute Entry/Exit Times. Each sim's early-stop status is read from
+    # self._last_stop_reason right after the call, since first_entry_time's return value alone
+    # can't distinguish a real max_steps run from an early-stopped one (see ALGO_NAMES comment).
+    algos = {
+        'softmin': softmin, 'sa': sa, 'cbo': cbo, 'cbo_annealed': cbo_annealed,
+        'pso': pso, 'standard_cbo': standard_cbo, 'standard_pso': standard_pso,
+    }
+    times = {}
+    statuses = {}
+    for name, sim in algos.items():
+        times[name] = sim.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+        statuses[name] = sim._last_stop_reason
+
+    return (exp_name, param, seed,
+            *(times[a] for a in ALGO_NAMES),
+            *(statuses[a] for a in ALGO_NAMES))
 
 
 def task_key(t):
@@ -177,12 +193,15 @@ if __name__ == '__main__':
         worker_fn=worker_task,
     )
 
-    # Automatically convert the flat CSV back into the .pkl format the notebook expects
+    # Automatically convert the flat CSV back into the .pkl format the notebook expects. The
+    # trailing _status columns are audit-trail data for the master CSV, not plotting data --
+    # zip(algo_names, values) in reconstruct_pkl_files_from_csv truncates to len(algo_names), so
+    # this reads only the time-value block and silently ignores the status block that follows it
+    # (same trick run_lennard_jones.py already relies on and documents for its two metric blocks).
     reconstruct_pkl_files_from_csv(
         results_csv=RESULTS_CSV,
         key_indices=[0, 1],       # experiment, parameter
         value_start=3,            # skip seed (index 2); values start at softmin
-        algo_names=['softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
-                     'standard_cbo', 'standard_pso'],
+        algo_names=ALGO_NAMES,
         filename_fn=filename_for,
     )

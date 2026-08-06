@@ -20,8 +20,12 @@ MAX_STEPS = 10_000_000
 # from Softmin's decaying beta) -- see run_experiments_resumable.py for the same convention.
 CBO_BETA_GROWTH = 1.001
 
-HEADER = ['dimension', 'seed', 'softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
-          'standard_cbo', 'standard_pso']
+ALGO_NAMES = ['softmin', 'sa', 'cbo', 'cbo_annealed', 'pso', 'standard_cbo', 'standard_pso']
+
+# Status columns (2026-08-06): trailing block, one per algorithm, recording each sim's honest
+# self._last_stop_reason -- see run_experiments_resumable.py's HEADER comment for the full
+# rationale (same pattern, applied here for consistency).
+HEADER = ['dimension', 'seed', *ALGO_NAMES, *(f'{a}_status' for a in ALGO_NAMES)]
 
 FILENAME_BY_ALGO = {
     'softmin': "results/SoftMin_ackley_function_dim{dim}.pkl",
@@ -110,17 +114,21 @@ def worker_task(args):
         bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
     )
 
-    # 5. Execute vectorized step loops
-    t_softmin = softmin.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_sa = sa.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_cbo = cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_cbo_annealed = cbo_annealed.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_pso = pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_standard_cbo = standard_cbo.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    t_standard_pso = standard_pso.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+    # 5. Execute vectorized step loops. Each sim's early-stop status is read from
+    # self._last_stop_reason right after the call (see run_experiments_resumable.py).
+    algos = {
+        'softmin': softmin, 'sa': sa, 'cbo': cbo, 'cbo_annealed': cbo_annealed,
+        'pso': pso, 'standard_cbo': standard_cbo, 'standard_pso': standard_pso,
+    }
+    times = {}
+    statuses = {}
+    for name, sim in algos.items():
+        times[name] = sim.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+        statuses[name] = sim._last_stop_reason
 
-    return (dimension, seed, t_softmin, t_sa, t_cbo, t_cbo_annealed, t_pso,
-            t_standard_cbo, t_standard_pso)
+    return (dimension, seed,
+            *(times[a] for a in ALGO_NAMES),
+            *(statuses[a] for a in ALGO_NAMES))
 
 
 def task_key(t):
@@ -151,11 +159,12 @@ if __name__ == '__main__':
         worker_fn=worker_task,
     )
 
+    # Trailing _status columns are audit-trail data, not plotting data -- see
+    # run_experiments_resumable.py's matching comment for why this needs no other change here.
     reconstruct_pkl_files_from_csv(
         results_csv=RESULTS_CSV,
         key_indices=[0],   # dimension
         value_start=2,      # skip seed (index 1)
-        algo_names=['softmin', 'sa', 'cbo', 'cbo_annealed', 'pso',
-                    'standard_cbo', 'standard_pso'],
+        algo_names=ALGO_NAMES,
         filename_fn=filename_for,
     )

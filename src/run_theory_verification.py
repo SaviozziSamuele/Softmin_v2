@@ -6,8 +6,10 @@ from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv
 from potentials import asymmetric_double_well
 from simulations import SoftminEnergyAdagrad
 
-job_id = os.environ.get("SLURM_JOB_ID", "local")
-RESULTS_CSV = f'results/master_theory_verification_init0_0p05_{job_id}.csv'
+# Fixed filename (2026-08-06), matching every other driver's convention -- see
+# run_experiments_resumable.py's HEADER comment for why job-ID-keying never actually provided
+# real crash-resumability.
+RESULTS_CSV = 'results/master_theory_verification_init0_0p05.csv'
 MAX_STEPS = 10_000_000
 
 # Fixed asymmetry for the well: small enough to keep 3 real critical points across the whole
@@ -16,7 +18,18 @@ MAX_STEPS = 10_000_000
 # symmetric barrier crossing.
 TILT = 0.05
 
-HEADER = ['experiment', 'parameter', 'noise', 'seed', 'softmin_static']
+# abort_on_stagnation is explicitly OFF here (2026-08-06), unlike every algorithm-comparison
+# driver: this file measures genuine barrier-crossing escape times at fixed, deliberately small
+# beta=2.0 and low noise_intensity -- a rare-event regime, not the "fast, continuously-improving
+# convergence" regime the default stagnation patience (5 checks x 1000 steps) was validated
+# against. Confirmed empirically at delta=4.0 (near the hard end of the sweep below): the
+# mechanism enabled aborts at step 5000 via value_stagnation, but the IDENTICAL seeded trajectory
+# with it disabled genuinely reaches the target at step 12,809 -- a real escape the default
+# patience would have silently discarded as a timeout. Position-collapse abort is unaffected and
+# stays on (unchanged from this file's pre-2026-08-06 behavior, already implicitly trusted).
+ABORT_ON_STAGNATION = False
+
+HEADER = ['experiment', 'parameter', 'noise', 'seed', 'softmin_static', 'softmin_static_status']
 
 
 def worker_task(args):
@@ -44,9 +57,11 @@ def worker_task(args):
         bounds=bounds, noise="normal", beta_decay=None, beta=2.0
     )
 
-    # Compute Entry/Exit Times
-    t_softmin = softmin_decay.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
-    return experiment, param, noise_val, seed, t_softmin
+    # Compute Entry/Exit Time. abort_on_stagnation=False -- see module-level comment.
+    t_softmin = softmin_decay.first_entry_time(
+        target_set=set_, max_steps=MAX_STEPS, abort_on_stagnation=ABORT_ON_STAGNATION,
+    )
+    return experiment, param, noise_val, seed, t_softmin, softmin_decay._last_stop_reason
 
 
 def task_key(t):
