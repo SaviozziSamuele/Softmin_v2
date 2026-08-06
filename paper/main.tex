@@ -512,7 +512,7 @@ To evaluate topological escape ($\sigma=1$), subsequent benchmarks initialize th
 
 Figure \ref{fig:experiments} (Center) extends this analysis to an unbalanced 2D quadruple well. In this higher-dimensional setting, the numerical artifacts observed in 1D vanish; particles subjected to large discrete gradient updates typically scatter off steep walls rather than traversing the narrow topological saddle. Consequently, both PSO and CBO fail to escape the suboptimal well due to variance collapse and are omitted from the plot. Simulated Annealing again exhibits exponential scaling with barrier height, eventually plateauing when the required transition time exceeds the maximum step limit. In contrast, the Softmin methods outperform baseline techniques by actively repelling particles to generate the spatial variance necessary for escape. \todo{This figure predates a since-fixed cooling-schedule bug in the SA baseline and a hyperparameter retuning pass (Appendix \ref{app:hyperparameters}) and needs regenerating. It previously also claimed a decaying-schedule advantage here; single-seed spot checks during the retuning pass instead found a properly-tuned \emph{fixed} $\beta$ consistently reaches the target faster than both a decaying and an increasing schedule (see Remark \ref{rem:higher-dim}), so this sentence should be rewritten once the regenerated, fully-averaged data confirms which direction actually holds -- do not reintroduce the old claim by default.} \todo{The ``variance collapse'' claim for CBO/PSO above (and the matching caption on Figure \ref{fig:experiments}, Center) was based on data collected before an early-stopping fix (2026-08-06) to the entry-time measurement itself: the previous implementation aborted a run whenever particle positions collapsed to a point, but returned the identical sentinel value for a genuine early abort and for a run that simply exhausted the full step budget, so most of the archived CBO/PSO data for this benchmark could not actually distinguish the two -- some fraction of it is a real "variance collapse" and the rest is an indistinguishable timeout that was never disclosed as such. The fix adds an independent, algorithm-agnostic stagnation check (best\_global\_value plateauing) alongside the existing collapse check, and both are now logged per-run rather than inferred, so a genuine collapse can finally be told apart from a timeout in the regenerated data. Do not restate "variance collapse" as settled until the quadruple-well sweep is regenerated under the corrected mechanism.}
 
-Finally, Figure \ref{fig:experiments} (Right) evaluates scalability on the generalized Ackley function across 10 to 90 dimensions. Particles are initialized uniformly over a compact domain containing an exponential number of local minima. SA fails to converge across all tested dimensions. As the search space volume increases, CBO and PSO reach the computational step limit without escaping by dimensions 30 and 70, respectively. In contrast, Softmin scales robustly. By actively repelling particles from sub-optimal basins, the dynamics effectively drive the swarm toward the global optimum, demonstrating its efficacy in complex, high-dimensional landscapes. \todo{"Reach the computational step limit" here needs the same re-verification as the quadruple-well claim above (same early-stopping fix, 2026-08-06) -- confirm against the regenerated, per-run-logged data before restating.}
+Finally, Figure \ref{fig:experiments} (Right) evaluates scalability on the generalized Ackley function across 10 to 90 dimensions. Particles are initialized uniformly over a compact domain containing an exponential number of local minima. SA fails to converge across all tested dimensions, and CBO reaches the computational step limit without escaping by dimension 30. In contrast, Softmin scales robustly. By actively repelling particles from sub-optimal basins, the dynamics effectively drive the swarm toward the global optimum, demonstrating its efficacy in complex, high-dimensional landscapes. \todo{This figure predates two 2026-08-06 fixes and needs regenerating: (1) the early-stopping mechanism itself (see the quadruple-well todo above); (2) PSO's own hyperparameters -- direct escape-time testing found the literature-standard constriction coefficients used here fail at every dimension tested (d=50/70/90), but a retuned triple (w,c1,c2)=(0.4,2.0,2.0), found via the same diagnostic-guided sweep given to every other algorithm (App. \ref{app:hyperparameter-methodology}), succeeds at all three. The old "PSO reaches the computational step limit by dimension 70" claim was a hyperparameter artifact, not an algorithmic limitation, and has been removed pending the regenerated sweep under the corrected PSO configuration; do not reintroduce it.} CBO's own step limit, by contrast, was re-confirmed as a genuine finding: an 11-value beta sweep plus two annealed-schedule variants (App. \ref{app:hyperparameter-methodology}) found no configuration that escapes this benchmark either.
 
 \section{Conclusion}
 
@@ -733,13 +733,13 @@ All numerical experiments were executed on the \emph{Toeplitz} Scientific Comput
 \end{itemize}
 
 \subsection{General Experimental Settings}
-Table \ref{tab:general_settings} summarizes the shared parameters utilized across all algorithms for each specific landscape. The swarm size and maximum step limits were kept constant to provide a fair baseline for evaluating the topological escape mechanisms.
+Table \ref{tab:general_settings} summarizes the shared parameters utilized across all algorithms for each specific landscape. The swarm size and maximum step limits were kept constant to provide a fair baseline for evaluating the topological escape mechanisms. Domain bounds for the 1D and 2D wells are derived directly from each landscape's own critical points rather than set by hand: the domain extends $K=5$ natural harmonic fluctuation-lengthscales ($1/\sqrt{f''}$ at the relevant minimum, or the softest Hessian eigendirection in 2D) beyond the outermost minimum -- the same role a $5\sigma$ truncation plays for a locally-Gaussian process, giving negligible boundary-contamination probability without an oversized domain. A fixed absolute margin was checked and found to represent anywhere from $\sim\!1$ to $\sim\!5.5$ lengthscales across the swept difficulty range, an uncalibrated $>\!5\times$ inconsistency this formula removes. The quadruple well is swept over $a\in\{2,\dots,30\}$ (not $1$): at $a=1$ the softest Hessian eigenvalue at the well vanishes exactly, so the landscape does not yet have a genuine local minimum in that direction.
 
 \begin{table}[!htbp]
 \centering
 \caption{General settings and landscape configurations.}
 \label{tab:general_settings}
-\begin{tabular}{@{}ll@{}}
+\begin{tabular}{@{}lp{0.62\textwidth}@{}}
 \toprule
 \textbf{Parameter} & \textbf{Value / Description} \\ 
 \midrule
@@ -747,13 +747,13 @@ Swarm Size ($n$) & 100 \\
 Independent Runs & 100 (1D/2D wells, Ackley), 30 (Lennard-Jones) \\
 Max Step Limit & $2\times10^9$ (1D/2D wells), $10^7$ (Ackley), $10^5$ (Lennard-Jones) \\
 \midrule
-\textbf{1D Double Well} & $f(x) = \frac{1}{4}x^4 - a x^2$ \\
-Initialization & Uniformly sampled around the left-most minimum \\
-Domain Bounds & $[-0.5-\sqrt{a},\ \sqrt{a}+0.5]$ \\
+\textbf{1D Double Well} & $f(x) = x^4 - a x^2 + 0.05x$ (asymmetric: the linear tilt breaks the left/right symmetry, giving a genuinely suboptimal starting basin -- see \S\ref{app:hyperparameter-methodology}) \\
+Initialization & Uniformly sampled around the shallower (suboptimal) minimum $z_-$ \\
+Domain Bounds & $[z_- - 5/\sqrt{f''(z_-)},\ z_+ + 5/\sqrt{f''(z_+)}]$, $f''(x)=12x^2-2a$ ($z_\pm$: the two minima) \\
 \midrule
-\textbf{2D Quadruple Well} & $f(x,y) = x^4 + y^4 - a(x^2 + y^2) - xy$ \\
+\textbf{2D Quadruple Well} & $f(x,y) = x^4 + y^4 - a(x^2 + y^2) + xy$ \\
 Initialization & Uniformly sampled around the suboptimal trap \\
-Domain Bounds & $[-4.0, 4.0]^2$ \\
+Domain Bounds & $[-(c+m),\ c+m]^2$, $c=\tfrac12\sqrt{2a-1}$, $m=5/\sqrt{\lambda_{\min}}$, $\lambda_{\min}=f_{xx}(c,c)-|f_{xy}(c,c)|$ \\
 \midrule
 \textbf{High-Dimensional Ackley} & Generalized Ackley ($d \in [10, 90]$) \\
 Function Parameters & $a=20.0$, $b=0.2$, $c=2\pi$ \\
@@ -771,6 +771,24 @@ Domain Bounds & $[-(R_c+2),\ R_c+2]^d$, $R_c = 1.5 N^{1/3} + 1.5$ \\
 \label{app:hyperparameter-methodology}
 
 Learning rates are unified to $\eta=0.001$ across every benchmark and algorithm (the Theorem 3.2 verification drivers excepted, which use their own, separately-motivated small-noise/small-step-size regime). The Softmin inverse temperature $\beta$ is selected per benchmark family via a two-stage, code-audited procedure (\texttt{src/hyperparameter\_diagnostics.py}), evaluated at a representative \emph{middle}-of-sweep setting rather than the hardest one, so the choice is not fit to the one condition the sweep is meant to stress-test: (1) an initial screen measures the distribution of $\beta(f_i-J_\beta)$ across the ensemble, flagging candidate values where trailing particles are not uniformly driven into the exponentially-suppressed regime; (2) because that screen alone favors values that are too small -- it only measures whether every particle receives rescue-drift, not what the reported first-entry-time metric rewards, namely the single fastest particle reaching the target, which benefits from a \emph{concentrated} ensemble via the leading particle's prefactor approaching $n$ -- the candidates are then validated directly by measuring actual entry time. Across every benchmark tested (1D double well, 2D quadruple well, high-dimensional Ackley), this second step confirmed $\beta=10$ as at or near the empirical optimum, matching the value used throughout; going lower is consistently slower or fails to reach the target at all, and going higher does not help (and is markedly worse on the quadruple well). The same direct-validation procedure was applied to Simulated Annealing's geometric cooling rate, and to comparing $\beta$ held fixed against both a decaying and an increasing schedule -- see Remark \ref{rem:higher-dim} for the latter result. The Lennard-Jones benchmark additionally clips the gradient's Lennard-Jones term (never the confinement term, whose restoring force must scale freely to remain able to pull back an atom that has drifted outside the container) to a per-atom norm of 1.0 before the swarm's discrete update, applied identically to every algorithm; this clip is not applied to the L-BFGS-B local polish (``quench'') of each method's final configuration, which uses the true, unclipped gradient throughout, since a quasi-Newton method's curvature estimate is only valid for the true gradient.
+
+\paragraph{Baselines received the same budget, not literature defaults asserted without checking.} Simulated Annealing, CBO, and PSO were given the identical diagnostic-guided procedure and, where a comparable parameterization exists, the identical candidate budget as Softmin's $\beta$ (Table \ref{tab:calibration_budget}), rather than unexamined literature-standard values. \emph{Simulated Annealing}: seven candidate cooling rates were derived from target cooling \emph{timescales} $t^\star\in\{10^3,3{\times}10^3,10^4,3{\times}10^4,10^5,3{\times}10^5,10^6\}$ (steps to reach 5\% of the initial temperature, $\text{rate}=0.05^{1/t^\star}$) rather than hand-picked decimals, and validated directly the same way as $\beta$; the shipped rate ($0.99995$) was reconfirmed on both wells. \emph{CBO}: the same 11-value $\beta$ grid used for Softmin was swept, together with two annealed-schedule variants (growth-only, unlike Softmin's decaying schedule, matching CBO's own literature convention). The result is a genuine negative finding, not an oversight: every candidate times out via consensus collapse on the double well, the quadruple well, \emph{and} Ackley, so $\beta=10$ is retained as the literature-standard value since no alternative tested empirically helps. \emph{PSO} has no single temperature-like scalar to sweep, so six named, literature-grounded $(w,c_1,c_2)$ triples were tested instead (the canonical Clerc--Kennedy constriction coefficients used throughout; the original Kennedy--Eberhart rule; both endpoints of the Eberhart--Shi linearly-decreasing-inertia schedule; a social-weighted variant biased toward the swarm's global best; and a deliberately non-contractive stress-test triple), pre-filtered by a finite/at-bound stability probe. On the double well and quadruple well, PSO shows the same negative result as CBO. On Ackley, however, the literature-standard default itself \emph{fails} -- timing out via consensus collapse at every dimension tested ($d=50,70,90$) -- while two of the six alternatives succeed at all three; the faster, $(w,c_1,c_2)=(0.4,2.0,2.0)$, was adopted for Ackley (and, on a spot check, also improves the Lennard-Jones quenched result) and is reported as the effective baseline there instead of the failing default -- see the corresponding \todo{} in the Numerical Experiments section.
+
+\begin{table}[!htbp]
+\centering
+\caption{Calibration budget: candidate values/triples tested, per benchmark family, for each algorithm's diagnostic-guided tuning pass. PSO's lower total reflects having no schedule mechanism to test (see text), not less scrutiny.}
+\label{tab:calibration_budget}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Fixed candidates} & \textbf{Schedule variants} & \textbf{Total per benchmark} \\
+\midrule
+Softmin & 11 & 2 & 13 \\
+SA & 7 & 0 & 7 \\
+CBO & 11 & 2 & 13 \\
+PSO & 6 & 0 & 6 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{table}[!htbp]
 \centering
@@ -793,7 +811,7 @@ Fixed Inverse Temperature ($\beta$) & 10.0 (Benchmarks), 2.0 (Theorem 3.2 Verifi
 \centering
 \caption{Hyperparameters for Simulated Annealing (SA).}
 \label{tab:sa_hyperparams}
-\begin{tabular}{@{}ll@{}}
+\begin{tabular}{@{}lp{0.45\textwidth}@{}}
 \toprule
 \textbf{Parameter} & \textbf{Value} \\
 \midrule
@@ -801,30 +819,30 @@ Learning Rate ($\eta$) & 0.001 \\
 Base Noise Variance Factor & $2 \times \sigma \times \eta$ \\
 Initial Temperature ($T_0$) & 10.0 \\
 Cooling Schedule & Geometric \\
-Geometric Cooling Rate & 0.99995 (1D/2D wells), 0.9999 (Ackley, Lennard-Jones) \\
+Geometric Cooling Rate & 0.99995 (1D/2D wells, re-validated via a 7-candidate timescale sweep), 0.9999 (Ackley, Lennard-Jones) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[!htbp]
 \centering
-\caption{Hyperparameters for Gradient-Aware Particle Swarm Optimization (PSO).}
+\caption{Hyperparameters for Gradient-Aware Particle Swarm Optimization (PSO). The literature-standard constriction coefficients were found, by direct escape-time testing, to fail on Ackley specifically (all dimensions tested); a diagnostic-guided alternative is used there instead (see \S\ref{app:hyperparameter-methodology}).}
 \label{tab:pso_hyperparams}
 \begin{tabular}{@{}ll@{}}
 \toprule
 \textbf{Parameter} & \textbf{Value} \\
 \midrule
 Gradient Step Learning Rate ($\eta$) & 0.001 \\
-Inertia Weight ($w$) & 0.729 \\
-Cognitive Coefficient ($c_1$) & 1.49445 \\
-Social Coefficient ($c_2$) & 1.49445 \\
+Inertia Weight ($w$) & 0.729 (1D/2D wells), 0.4 (Ackley, Lennard-Jones) \\
+Cognitive Coefficient ($c_1$) & 1.49445 (1D/2D wells), 2.0 (Ackley, Lennard-Jones) \\
+Social Coefficient ($c_2$) & 1.49445 (1D/2D wells), 2.0 (Ackley, Lennard-Jones) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[!htbp]
 \centering
-\caption{Hyperparameters for Consensus-Based Optimization (CBO).}
+\caption{Hyperparameters for Consensus-Based Optimization (CBO). $\beta$ retained at the literature-standard value: an 11-value sweep plus two annealed-schedule variants found no configuration that escapes any of the three main benchmarks (a genuine negative finding, see \S\ref{app:hyperparameter-methodology}).}
 \label{tab:cbo_hyperparams}
 \begin{tabular}{@{}ll@{}}
 \toprule
@@ -833,7 +851,7 @@ Social Coefficient ($c_2$) & 1.49445 \\
 Learning Rate ($\Delta t$) & 0.001 \\
 Consensus Weight ($\lambda$) & 1.0 \\
 Exploration Noise ($\sigma_{\text{CBO}}$) & $\sqrt{2}$ \\
-Temperature ($\alpha$) & 10.0 \\
+Inverse Temperature ($\beta$) & 10.0 \\
 \bottomrule
 \end{tabular}
 \end{table}

@@ -15,10 +15,14 @@ of the ranges actually swept in run_experiments_resumable.py / run_ackley_dimens
 import numpy as np
 
 from potentials import (
-    one_dimensional_double_well,
+    asymmetric_double_well,
     unbalanced_quadruple_well_setting,
     high_dim_ackley_function_setting,
 )
+
+# Matches run_experiments_resumable.py's DOUBLE_WELL_TILT -- these diagnostics must validate
+# hyperparameters against the actual benchmark production uses.
+DOUBLE_WELL_TILT = 0.05
 from simulations import (
     SoftminEnergyAdagrad, SimulatedAnnealing, GradientAwareCBO, GradientAwarePSO, CBO, PSO,
 )
@@ -147,39 +151,111 @@ def cbo_ess_report(f_vec, f_grad_vec, d, bounds, particle_init, lr, beta_values,
 
 
 # ---------------------------------------------------------------------------
+# Generic escape-time sweep -- the deciding measurement, shared by every algorithm family below
+# ---------------------------------------------------------------------------
+
+def escape_time_sweep(target_set, sim_factories, max_steps=20_000, seed=42):
+    """The deciding measurement, used for every algorithm's calibration below: unlike a fairness
+    proxy (ensemble-wide, or ESS-based), this directly measures first_entry_time -- the fastest
+    particle reaching the target -- which is what the benchmarks actually score.
+
+    `sim_factories` is `{label: zero-arg callable returning a fresh Simulation}`, the same pattern
+    already used by `stagnation_check_validation`. Returns
+    `{label: (entry_time, timed_out, best_global_value, stop_reason)}` -- `stop_reason` (from
+    `Simulation._last_stop_reason`) is what actually distinguishes a real hit from an early-stopped
+    or exhausted run; `timed_out` is just `stop_reason != 'target_reached'`.
+    """
+    results = {}
+    for label, factory in sim_factories.items():
+        np.random.seed(seed)
+        sim = factory()
+        t = sim.first_entry_time(target_set=target_set, max_steps=max_steps)
+        stop_reason = sim._last_stop_reason
+        results[label] = (t, stop_reason != 'target_reached', float(sim.best_global_value), stop_reason)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Softmin: direct escape-time validation -- fixed vs. decaying vs. increasing beta
 # ---------------------------------------------------------------------------
 
 def escape_time_validation(f_vec, f_grad_vec, d, bounds, particle_init, target_set, lr,
                             fixed_betas, schedules=(), max_steps=20_000, seed=42):
-    """The deciding measurement: unlike beta_gap_report (ensemble-wide fairness), this directly
-    measures first_entry_time -- the fastest particle reaching the target -- which is what the
-    benchmarks actually score. `schedules` is a list of (label, beta0, beta_decay) triples layered
-    on top of SoftminEnergyAdagrad's own beta_decay mechanism (values < 1 anneal down, values > 1
-    anneal up -- step() does not restrict beta_decay to (0, 1); growth rates >= 1.01 were observed
-    to overflow beta to inf well within max_steps=20_000, so keep any growth schedule tested here
-    below that). Returns {label: (entry_time, timed_out, best_global_value)} -- entry_time equals
-    max_steps*lr on timeout for every candidate, so best_global_value is what actually
-    distinguishes "close" timeouts from "nowhere near" ones.
+    """Softmin-specific wrapper around `escape_time_sweep`. `schedules` is a list of
+    (label, beta0, beta_decay) triples layered on top of SoftminEnergyAdagrad's own beta_decay
+    mechanism (values < 1 anneal down, values > 1 anneal up -- step() does not restrict beta_decay
+    to (0, 1); growth rates >= 1.01 were observed to overflow beta to inf well within
+    max_steps=20_000, so keep any growth schedule tested here below that).
     """
-    results = {}
-
-    def _run(beta0, beta_decay):
-        np.random.seed(seed)
-        sim = SoftminEnergyAdagrad(
+    def _factory(beta0, beta_decay):
+        return lambda: SoftminEnergyAdagrad(
             n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds, particle_init=particle_init,
             initial_lr=lr, adaptive_lr=False, noise_intensity=1.0, noise="normal",
             beta_decay=beta_decay, beta=beta0,
         )
-        t = sim.first_entry_time(target_set=target_set, max_steps=max_steps)
-        timed_out = t >= max_steps * lr
-        return t, timed_out, float(sim.best_global_value)
+    sim_factories = {f'fixed beta={beta}': _factory(beta, None) for beta in fixed_betas}
+    sim_factories.update({label: _factory(beta0, beta_decay) for label, beta0, beta_decay in schedules})
+    return escape_time_sweep(target_set, sim_factories, max_steps=max_steps, seed=seed)
 
-    for beta in fixed_betas:
-        results[f'fixed beta={beta}'] = _run(beta, None)
-    for label, beta0, beta_decay in schedules:
-        results[label] = _run(beta0, beta_decay)
-    return results
+
+# ---------------------------------------------------------------------------
+# SA: direct escape-time validation across cooling_rate, derived from target cooling timescales
+# ---------------------------------------------------------------------------
+
+def sa_escape_time_validation(f_vec, f_grad_vec, d, bounds, particle_init, target_set, lr,
+                               cooling_rates, initial_temperature=10.0, max_steps=20_000, seed=42):
+    """SA-specific wrapper around `escape_time_sweep`. `cooling_rates` is a plain list of rates
+    (not (label, rate) pairs) -- labeled automatically here so callers can pass the
+    timescale-derived list directly (see SA_COOLING_RATES in __main__)."""
+    def _factory(rate):
+        return lambda: SimulatedAnnealing(
+            n=100, d=d, f=f_vec, df=f_grad_vec, particle_init=particle_init, bounds=bounds,
+            learning_rate=lr, cooling_rate=rate, noise=1.0, cooling_schedule="geometric",
+            initial_temperature=initial_temperature,
+        )
+    sim_factories = {f'cooling_rate={rate}': _factory(rate) for rate in cooling_rates}
+    return escape_time_sweep(target_set, sim_factories, max_steps=max_steps, seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# CBO: direct escape-time validation across beta, plus the annealed-schedule question
+# ---------------------------------------------------------------------------
+
+def cbo_escape_time_validation(cls, f_vec, f_grad_vec, d, bounds, particle_init, target_set, lr,
+                                consensus_rate, noise_intensity, fixed_betas, schedules=(),
+                                max_steps=20_000, seed=42):
+    """CBO-specific wrapper around `escape_time_sweep`. `cls` is `CBO` or `GradientAwareCBO`.
+    `schedules` is a list of (label, beta0, beta_growth) triples -- growth-only, unlike Softmin's
+    beta_decay (CBO's beta_growth must be > 1; see GradientAwareCBO/CBO's own validation)."""
+    def _factory(beta0, beta_growth):
+        return lambda: cls(
+            n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds, particle_init=particle_init,
+            learning_rate=lr, consensus_rate=consensus_rate, noise_intensity=noise_intensity,
+            beta=beta0, beta_growth=beta_growth,
+        )
+    sim_factories = {f'fixed beta={beta}': _factory(beta, None) for beta in fixed_betas}
+    sim_factories.update({label: _factory(beta0, beta_growth) for label, beta0, beta_growth in schedules})
+    return escape_time_sweep(target_set, sim_factories, max_steps=max_steps, seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# PSO: direct escape-time validation across a small, named set of (w, c1, c2) triples
+# ---------------------------------------------------------------------------
+
+def pso_escape_time_validation(cls, f_vec, f_grad_vec, d, bounds, particle_init, target_set, lr,
+                                candidates, max_steps=20_000, seed=42):
+    """PSO-specific wrapper around `escape_time_sweep`. `cls` is `PSO` or `GradientAwarePSO`.
+    `candidates` is `{label: (w, c1, c2)}` -- PSO has no single temperature-like scalar to sweep,
+    so this is a small, named, literature-grounded set instead of a 1D grid (see PSO_CANDIDATES
+    in __main__)."""
+    sim_factories = {
+        label: (lambda w=w, c1=c1, c2=c2: cls(
+            n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds, particle_init=particle_init,
+            learning_rate=lr, w=w, c1=c1, c2=c2,
+        ))
+        for label, (w, c1, c2) in candidates.items()
+    }
+    return escape_time_sweep(target_set, sim_factories, max_steps=max_steps, seed=seed)
 
 
 # ---------------------------------------------------------------------------
@@ -278,106 +354,143 @@ def stability_probe(sim_factory, n_steps=2000):
     }
 
 
+LR = 0.001
+GAP_CANDIDATES = [10.0, 3.0, 1.0, 0.3, 0.1]
+ESCAPE_FIXED_BETAS = [50.0, 30.0, 20.0, 15.0, 10.0, 3.0, 1.0, 0.3, 0.1, 0.03, 0.01]
+ESCAPE_SCHEDULES = [
+    ('decay 10->, r=0.999', 10.0, 0.999),
+    ('growth 0.01->, r=1.005', 0.01, 1.005),
+]
+# Chosen value, shipped in every production driver.
+CHOSEN_BETA = 10.0
+
+# SA: candidate cooling_rate list derived the same principled way as the bounds fix (2026-08-06)
+# in potentials.py -- not arbitrary decimals, but rates corresponding to clean target cooling
+# *timescales* (t_star = steps to reach 5% of initial temperature, exactly what sa_cooling_report
+# already computes analytically): cooling_rate = 0.05**(1/t_star). The shipped 0.99995 sits at
+# t_star~59,900, between the 30,000- and 100,000-step candidates, so this brackets it on both
+# sides rather than only extending in one direction.
+SA_T_STARS = [1000, 3000, 10000, 30000, 100000, 300000, 1000000]
+SA_COOLING_RATES = [0.05 ** (1 / t) for t in SA_T_STARS]
+
+# CBO: beta_growth schedule variants (growth-only, unlike Softmin's beta_decay -- see
+# cbo_escape_time_validation). Safe to test the faster variant now that beta_max caps overflow.
+CBO_SCHEDULES = [
+    ('growth 10->, r=1.001 (shipped)', 10.0, 1.001),
+    ('growth 1->, r=1.01', 1.0, 1.01),
+]
+
+# PSO: no single temperature-like scalar, so a small, named, literature-grounded set instead of a
+# 1D grid. 'aggressive/stress-test' is deliberately non-contractive (w>=1) -- PSO's constructor
+# has no stability validation at all (unlike CBO's), so this gives the stability_probe pre-filter
+# below something real to catch.
+PSO_CANDIDATES = {
+    'canonical constriction (default)': (0.729, 1.49445, 1.49445),
+    'Kennedy-Eberhart 1995': (1.0, 2.0, 2.0),
+    'Eberhart-Shi low-w': (0.4, 2.0, 2.0),
+    'Eberhart-Shi high-w': (0.9, 2.0, 2.0),
+    'social-weighted': (0.729, 1.0, 2.0),
+    'aggressive/stress-test': (1.2, 2.0, 2.0),
+}
+
+# Calibration budget, tracked explicitly (2026-08-06) so "same effort across algorithms" is
+# checkable, not just asserted -- see paper's app:hyperparameter-methodology.
+CALIBRATION_BUDGET = {
+    'softmin': (len(ESCAPE_FIXED_BETAS), len(ESCAPE_SCHEDULES)),
+    'sa': (len(SA_COOLING_RATES), 0),
+    'cbo': (len(ESCAPE_FIXED_BETAS), len(CBO_SCHEDULES)),
+    'pso': (len(PSO_CANDIDATES), 0),
+}
+
+
+def _print_escape_results(results):
+    for label, (t, timed_out, best_val, reason) in results.items():
+        flag = "TIMEOUT" if timed_out else "reached"
+        print(f"  {label:>32}: {flag:<8} reason={reason:<18} t={t:.3f} best_global_value={best_val:.4g}")
+
+
+def report_benchmark(title, setting, d, cbo_noise_intensity=np.sqrt(2.0), cbo_consensus_rate=1.0):
+    """Runs the full four-algorithm calibration story (fairness proxy -> deciding measurement)
+    against one benchmark setting, printed in one block. Shared across double_well/quadruple_well/
+    Ackley so the same report can't silently drift out of sync between benchmarks."""
+    f_vec, f_grad_vec = setting['f_vec'], setting['f_grad_vec']
+    bounds, particle_init, target_set = setting['bounds'], setting['particle_init'], setting['set']
+
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+
+    print("\n-- softmin beta*gap (fairness proxy -- favors SMALL beta; do not tune on this alone) --")
+    for beta, stats in beta_gap_report(
+        f_vec, f_grad_vec, d, bounds, particle_init, LR, GAP_CANDIDATES,
+    ).items():
+        print(f"  beta={beta:>6}: median_gap={stats['median_gap']:.3g} "
+              f"frac_frozen={stats['frac_frozen']:.3f}")
+    print("-- softmin escape time (deciding measurement) --")
+    _print_escape_results(escape_time_validation(
+        f_vec, f_grad_vec, d, bounds, particle_init, target_set, LR,
+        ESCAPE_FIXED_BETAS, ESCAPE_SCHEDULES,
+    ))
+
+    print("\n-- SA cooling report at the shipped rate (fairness proxy) --")
+    print(f"  {sa_cooling_report(f_vec, f_grad_vec, d, bounds, particle_init, target_set, LR, 0.99995)}")
+    print("-- SA escape time across timescale-derived cooling_rate candidates (deciding measurement) --")
+    _print_escape_results(sa_escape_time_validation(
+        f_vec, f_grad_vec, d, bounds, particle_init, target_set, LR, SA_COOLING_RATES,
+    ))
+
+    print("\n-- CBO consensus ESS/n (fairness proxy) --")
+    for beta, stats in cbo_ess_report(
+        f_vec, f_grad_vec, d, bounds, particle_init, LR, GAP_CANDIDATES,
+        consensus_rate=cbo_consensus_rate, noise_intensity=cbo_noise_intensity,
+    ).items():
+        print(f"  beta={beta:>6}: median_ess_frac={stats['median_ess_frac']:.3f}")
+    print("-- CBO escape time across beta + annealed-schedule candidates (deciding measurement) --")
+    _print_escape_results(cbo_escape_time_validation(
+        GradientAwareCBO, f_vec, f_grad_vec, d, bounds, particle_init, target_set, LR,
+        cbo_consensus_rate, cbo_noise_intensity, ESCAPE_FIXED_BETAS, CBO_SCHEDULES,
+    ))
+
+    print("\n-- PSO stability_probe pre-filter --")
+    filtered_pso = {}
+    for label, (w, c1, c2) in PSO_CANDIDATES.items():
+        stats = stability_probe(lambda w=w, c1=c1, c2=c2: GradientAwarePSO(
+            n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds, particle_init=particle_init,
+            learning_rate=LR, w=w, c1=c1, c2=c2,
+        ))
+        verdict = "OK" if stats['finite'] else "EXCLUDED (diverged)"
+        print(f"  {label:>32}: {verdict:<20} {stats}")
+        if stats['finite']:
+            filtered_pso[label] = (w, c1, c2)
+    print("-- PSO escape time across surviving candidates (deciding measurement) --")
+    _print_escape_results(pso_escape_time_validation(
+        GradientAwarePSO, f_vec, f_grad_vec, d, bounds, particle_init, target_set, LR, filtered_pso,
+    ))
+
+
 if __name__ == '__main__':
-    LR = 0.001
-    GAP_CANDIDATES = [10.0, 3.0, 1.0, 0.3, 0.1]
-    ESCAPE_FIXED_BETAS = [50.0, 30.0, 20.0, 15.0, 10.0, 3.0, 1.0, 0.3, 0.1, 0.03, 0.01]
-    ESCAPE_SCHEDULES = [
-        ('decay 10->, r=0.999', 10.0, 0.999),
-        ('growth 0.01->, r=1.005', 0.01, 1.005),
-    ]
-    # Chosen value, shipped in every production driver -- see the module docstring above for how
-    # the two diagnostics below disagreed and why escape_time_validation is the one that won.
-    CHOSEN_BETA = 10.0
+    dw = asymmetric_double_well(delta=15, tilt=DOUBLE_WELL_TILT)
+    report_benchmark("DOUBLE WELL (delta=15, mid-sweep of 1..30)", dw, d=1)
 
-    print("=" * 70)
-    print("DOUBLE WELL (delta=15, mid-sweep of 1..30)")
-    print("=" * 70)
-    dw = one_dimensional_double_well(delta=15)
-    print("\n-- softmin beta*gap (fairness proxy -- favors SMALL beta; do not tune on this alone) --")
-    for beta, stats in beta_gap_report(
-        dw['f_vec'], dw['f_grad_vec'], 1, dw['bounds'], dw['particle_init'], LR,
-        GAP_CANDIDATES,
-    ).items():
-        print(f"  beta={beta:>6}: median_gap={stats['median_gap']:.3g} "
-              f"frac_frozen={stats['frac_frozen']:.3f}")
-    print("\n-- softmin escape time (deciding measurement -- favors LARGE beta, fixed over any schedule) --")
-    for label, (t, timed_out, best_val) in escape_time_validation(
-        dw['f_vec'], dw['f_grad_vec'], 1, dw['bounds'], dw['particle_init'], dw['set'], LR,
-        ESCAPE_FIXED_BETAS, ESCAPE_SCHEDULES,
-    ).items():
-        flag = "TIMEOUT" if timed_out else "reached"
-        print(f"  {label:>26}: {flag} t={t:.3f} best_global_value={best_val:.4g}")
-    print("\n-- SA cooling vs. entry-time timescale (cooling_rate=0.99995, corrected -- see below) --")
-    print("   0.9999 (old default) never escapes the quadruple well within 200k steps; kept here")
-    print("   only for the double well, where both rates work fine (no meaningful difference).")
-    sa_stats = sa_cooling_report(
-        dw['f_vec'], dw['f_grad_vec'], 1, dw['bounds'], dw['particle_init'], dw['set'], LR, 0.99995,
-    )
-    print(f"  {sa_stats}")
-    print("\n-- CBO consensus ESS/n --")
-    for beta, stats in cbo_ess_report(
-        dw['f_vec'], dw['f_grad_vec'], 1, dw['bounds'], dw['particle_init'], LR, GAP_CANDIDATES,
-        consensus_rate=1.0, noise_intensity=np.sqrt(2.0),
-    ).items():
-        print(f"  beta={beta:>6}: median_ess_frac={stats['median_ess_frac']:.3f}")
-
-    print("\n" + "=" * 70)
-    print("QUADRUPLE WELL (A=15, mid-sweep of 1..30)")
-    print("=" * 70)
     qw = unbalanced_quadruple_well_setting(A=15, delta=-1)
-    print("\n-- softmin beta*gap (fairness proxy -- favors SMALL beta; do not tune on this alone) --")
-    for beta, stats in beta_gap_report(
-        qw['f_vec'], qw['f_grad_vec'], 2, qw['bounds'], qw['particle_init'], LR,
-        GAP_CANDIDATES,
-    ).items():
-        print(f"  beta={beta:>6}: median_gap={stats['median_gap']:.3g} "
-              f"frac_frozen={stats['frac_frozen']:.3f}")
-    print("\n-- softmin escape time (deciding measurement -- favors LARGE beta, fixed over any schedule) --")
-    for label, (t, timed_out, best_val) in escape_time_validation(
-        qw['f_vec'], qw['f_grad_vec'], 2, qw['bounds'], qw['particle_init'], qw['set'], LR,
-        ESCAPE_FIXED_BETAS, ESCAPE_SCHEDULES,
-    ).items():
-        flag = "TIMEOUT" if timed_out else "reached"
-        print(f"  {label:>26}: {flag} t={t:.3f} best_global_value={best_val:.4g}")
-    print("\n-- SA cooling vs. entry-time timescale (cooling_rate=0.99995, corrected -- was 0.9999) --")
-    print("   0.9999 was found to never escape this benchmark at all within a 200k-step probe --")
-    print("   a genuine, previously undiagnosed SA bug specific to this harder benchmark.")
-    sa_stats = sa_cooling_report(
-        qw['f_vec'], qw['f_grad_vec'], 2, qw['bounds'], qw['particle_init'], qw['set'], LR, 0.99995,
-    )
-    print(f"  {sa_stats}")
-    print("\n-- CBO consensus ESS/n --")
-    for beta, stats in cbo_ess_report(
-        qw['f_vec'], qw['f_grad_vec'], 2, qw['bounds'], qw['particle_init'], LR, GAP_CANDIDATES,
-        consensus_rate=1.0, noise_intensity=np.sqrt(2.0),
-    ).items():
-        print(f"  beta={beta:>6}: median_ess_frac={stats['median_ess_frac']:.3f}")
+    report_benchmark("QUADRUPLE WELL (A=15, mid-sweep of 2..30)", qw, d=2)
 
-    print("\n" + "=" * 70)
-    print("HIGH-DIM ACKLEY (d=50, mid-sweep of 10..90)")
-    print("=" * 70)
     ak = high_dim_ackley_function_setting(d=50)
     ak_init = ak.get('particle_init', [[-10.0, 10.0]] * 50)
-    print("\n-- softmin beta*gap (fairness proxy -- favors SMALL beta; do not tune on this alone) --")
-    for beta, stats in beta_gap_report(
-        ak['f_vec'], ak['f_grad_vec'], 50, ak['bounds'], ak_init, LR, GAP_CANDIDATES,
-    ).items():
-        print(f"  beta={beta:>6}: median_gap={stats['median_gap']:.3g} "
-              f"frac_frozen={stats['frac_frozen']:.3f}")
-    print("\n-- softmin escape time (deciding measurement -- favors LARGE beta, fixed over any schedule) --")
-    for label, (t, timed_out, best_val) in escape_time_validation(
-        ak['f_vec'], ak['f_grad_vec'], 50, ak['bounds'], ak_init, ak['set'], LR,
-        ESCAPE_FIXED_BETAS, ESCAPE_SCHEDULES,
-    ).items():
-        flag = "TIMEOUT" if timed_out else "reached"
-        print(f"  {label:>26}: {flag} t={t:.3f} best_global_value={best_val:.4g}")
-    print("\n-- CBO consensus ESS/n --")
-    for beta, stats in cbo_ess_report(
-        ak['f_vec'], ak['f_grad_vec'], 50, ak['bounds'], ak_init, LR, GAP_CANDIDATES,
-        consensus_rate=1.0, noise_intensity=np.sqrt(2.0),
-    ).items():
-        print(f"  beta={beta:>6}: median_ess_frac={stats['median_ess_frac']:.3f}")
+    ak_full = {**ak, 'particle_init': ak_init}
+    report_benchmark("HIGH-DIM ACKLEY (d=50, mid-sweep of 10..90)", ak_full, d=50)
+
+    print("\n" + "=" * 70)
+    print("CBO stability boundary spot-check (consensus_rate=1.0, noise_intensity=sqrt(2))")
+    print("=" * 70)
+    print("Shipped combo exactly saturates the code's own documented '2*lambda > sigma**2' "
+          "stability comment (2*1.0 = 2 = (sqrt(2))**2, equality not strict inequality).")
+    cbo_stab = stability_probe(lambda: GradientAwareCBO(
+        n=100, d=1, f=dw['f_vec'], df=dw['f_grad_vec'], bounds=dw['bounds'],
+        particle_init=dw['particle_init'], learning_rate=LR, consensus_rate=1.0,
+        noise_intensity=np.sqrt(2.0), beta=CHOSEN_BETA,
+    ))
+    print(f"  {cbo_stab}")
 
     print("\n" + "=" * 70)
     print("EARLY-STOP MECHANISM VALIDATION (quadruple well, A=15 mid-sweep)")
@@ -407,6 +520,15 @@ if __name__ == '__main__':
         print(f"  {name:>20}: reason={stats['enabled_reason']:<18} step={stats['enabled_step']:<7} "
               f"uncapped_target_reached_step={stats['uncapped_target_reached_step']} "
               f"improved_after_abort={stats['improved_after_abort_in_uncapped_run']}")
+
+    print("\n" + "=" * 70)
+    print("CALIBRATION BUDGET (candidates x 3 benchmarks x one escape_time_sweep run each)")
+    print("=" * 70)
+    print(f"  {'algorithm':<10} {'fixed candidates':>18} {'schedule variants':>18} "
+          f"{'per benchmark':>15} {'x3 benchmarks':>15}")
+    for algo, (n_fixed, n_schedules) in CALIBRATION_BUDGET.items():
+        per_benchmark = n_fixed + n_schedules
+        print(f"  {algo:<10} {n_fixed:>18} {n_schedules:>18} {per_benchmark:>15} {per_benchmark*3:>15}")
 
     print("\n" + "=" * 70)
     print(f"CHOSEN: beta={CHOSEN_BETA} (fixed, no schedule) for all three benchmarks above, plus")

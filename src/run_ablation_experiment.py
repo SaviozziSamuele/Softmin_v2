@@ -3,8 +3,13 @@ import os
 import numpy as np
 
 from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv
-from potentials import one_dimensional_double_well
+from potentials import asymmetric_double_well
 from simulations import SoftminEnergyAdagrad
+
+# Matches run_experiments_resumable.py's DOUBLE_WELL_TILT -- this ablation shares the exact same
+# benchmark (see the docstring below), so it must share the exact same potential, not just the
+# same delta sweep.
+DOUBLE_WELL_TILT = 0.05
 
 # Fixed filename (2026-08-06), matching every other driver's convention -- was previously the
 # only remaining driver still keyed by SLURM_JOB_ID, an oversight from the earlier session's
@@ -34,7 +39,7 @@ def worker_task(args):
     param, seed = args
     np.random.seed(seed * 1000)
 
-    setting = one_dimensional_double_well(param)  # param is delta
+    setting = asymmetric_double_well(param, DOUBLE_WELL_TILT)  # param is delta
     d = 1
     particle_init = setting['particle_init']
 

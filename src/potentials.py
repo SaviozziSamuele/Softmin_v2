@@ -16,50 +16,37 @@ from sympy import symbols, diff, solve, lambdify, Piecewise, exp, sin, cos, sqrt
 from numpy.polynomial import polynomial as P
 from sympy.plotting import plot
 
+# Domain-bounds margin, used by every well-type potential below: extend `bounds` this many
+# natural harmonic fluctuation-lengthscales (ell = 1/sqrt(curvature)) beyond the outermost
+# critical point, rather than a fixed absolute distance. A fixed margin was checked (2026-08-06)
+# and found badly uncalibrated -- it represented anywhere from ~1 to ~5.5 lengthscales depending
+# on the difficulty parameter (delta/A), meaning "how much boundary buffer" was inconsistent
+# across a sweep for no principled reason. K=5 plays the same role a "5-sigma" truncation plays
+# for a locally-Gaussian process: negligible boundary-contamination probability near the wells,
+# without wastefully inflating the domain.
+BOUNDS_MARGIN_LENGTHSCALES = 5
 
-def one_dimensional_double_well(delta):
-    x = symbols('x')
-    f = x**4 - delta * x**2
-    df = diff(f, x)
-    a, b, c = P.polyroots([0, -2*delta, 0, 4])
 
-    f_num = lambdify(x, f, modules='numpy')
-    df_num = lambdify(x, df, modules='numpy')
-
-    def double_well(x):
-        return f_num(x)
-
-    def double_well_grad(x):
-        return df_num(x)
-
-    double_well_vec = np.vectorize(double_well, signature='(n)->()')
-    double_well_grad_vec = np.vectorize(double_well_grad, signature='(n)->(n)')
-
-    return {
-        'f_vec': double_well_vec,
-        'f_grad_vec': double_well_grad_vec,
-        'particle_init': [[a-0.2, a+0.2]],
-        'set': [[c-0.2, c+0.2]],
-        'bounds': [[-0.5-np.sqrt(delta), np.sqrt(delta)+0.5]],
-        'critical_points': [a, b, c],
-    }
+def _lengthscale_margin(curvature):
+    """K/sqrt(curvature) -- see BOUNDS_MARGIN_LENGTHSCALES."""
+    return BOUNDS_MARGIN_LENGTHSCALES / np.sqrt(curvature)
 
 
 def asymmetric_double_well(delta, tilt):
     """1D double well with a linear tilt term breaking left/right symmetry, so the two minima
-    have genuinely different depths. Needed to test escape from a suboptimal basin (the
-    symmetric `one_dimensional_double_well` has two equally-good minima, so there is no
-    suboptimal basin to escape from) — see Theorem 3.1 in `paper/SoftMin_revised_theory.tex`,
-    which analyzes escape from a starting basin `z_-` into an adjacent basin `z_+` with relative
-    height rho_+ = f(z_+) - f(z_-) >= 0.
+    have genuinely different depths -- the main benchmark family, giving every algorithm a
+    genuinely suboptimal starting basin to escape from (a symmetric double well has two
+    equally-good minima, so there is nothing suboptimal to escape). See Theorem 3.1 in
+    `paper/SoftMin_revised_theory.tex`, which analyzes escape from a starting basin `z_-` into an
+    adjacent basin `z_+` with relative height rho_+ = f(z_+) - f(z_-) >= 0.
     """
     x = symbols('x')
     f = x**4 - delta * x**2 + tilt * x
     df = diff(f, x)
 
-    # f'(x) = 4x^3 - 2*delta*x + tilt; the tilt term breaks the closed-form factorization
-    # `one_dimensional_double_well` relies on (roots 0, +-sqrt(delta/2)), so this needs the
-    # general cubic solver -- still handled numerically by polyroots.
+    # f'(x) = 4x^3 - 2*delta*x + tilt; without a closed-form factorization (tilt=0 would give
+    # roots 0, +-sqrt(delta/2)), this needs the general cubic solver -- handled numerically by
+    # polyroots.
     roots = P.polyroots([tilt, -2 * delta, 0, 4])
     real_roots = np.sort(roots[np.abs(roots.imag) < 1e-8].real)
     if len(real_roots) != 3:
@@ -88,12 +75,18 @@ def asymmetric_double_well(delta, tilt):
     else:
         z_start, z_target = right, left
 
+    # f''(x) = 12x^2 - 2*delta (the tilt term is linear, so it drops out of the second
+    # derivative) -- bounds margin scales with the true local curvature at each well, not a fixed
+    # distance; see BOUNDS_MARGIN_LENGTHSCALES.
+    f_pp_left = 12 * left**2 - 2 * delta
+    f_pp_right = 12 * right**2 - 2 * delta
+
     return {
         'f_vec': well_vec,
         'f_grad_vec': well_grad_vec,
         'particle_init': [[z_start - 0.2, z_start + 0.2]],
         'set': [[z_target - 0.2, z_target + 0.2]],
-        'bounds': [[left - 0.5, right + 0.5]],
+        'bounds': [[left - _lengthscale_margin(f_pp_left), right + _lengthscale_margin(f_pp_right)]],
         'critical_points': [left, saddle, right],
         'z_start': z_start,
         'saddle': saddle,
@@ -106,10 +99,14 @@ def unbalanced_quadruple_well_setting(A, delta):
     f = x**4 + y**4 - A*(x**2 + y**2) - delta*x*y
     f_x = diff(f, x)
     f_y = diff(f, y)
+    f_xx = diff(f_x, x)
+    f_xy = diff(f_x, y)
 
     f_num = lambdify((x, y), f, modules='numpy')
     f_x_num = lambdify((x, y), f_x, modules='numpy')
     f_y_num = lambdify((x, y), f_y, modules='numpy')
+    f_xx_num = lambdify((x, y), f_xx, modules='numpy')
+    f_xy_num = lambdify((x, y), f_xy, modules='numpy')
 
     crit_value = 0.5*np.sqrt(2*A+delta)
     critical_points = solve([f_x, f_y], (x, y))
@@ -123,11 +120,27 @@ def unbalanced_quadruple_well_setting(A, delta):
     quadruple_well_vec = np.vectorize(quadruple_well, signature='(n)->()')
     quadruple_well_grad_vec = np.vectorize(quadruple_well_grad, signature='(n)->(n)')
 
+    # Bounds margin scales with the true local curvature at the well (softest Hessian
+    # eigendirection), not a fixed distance or a separate ad hoc formula disconnected from
+    # crit_value -- see BOUNDS_MARGIN_LENGTHSCALES. At (crit_value, crit_value), the Hessian is
+    # [[f_xx, f_xy], [f_xy, f_xx]] by the function's own x<->y symmetry at this critical point;
+    # its eigenvalues are f_xx +- |f_xy|, so the softest one is f_xx - |f_xy|.
+    fxx_val = f_xx_num(crit_value, crit_value)
+    fxy_val = f_xy_num(crit_value, crit_value)
+    eig_soft = fxx_val - abs(fxy_val)
+    if eig_soft <= 0:
+        raise ValueError(
+            f"unbalanced_quadruple_well_setting(A={A}, delta={delta}) is degenerate: the softest "
+            f"Hessian eigenvalue at the well is {eig_soft} <= 0, so this isn't a genuine local "
+            f"minimum in that direction (at delta=-1, this happens exactly at A=1); increase A."
+        )
+    margin = _lengthscale_margin(eig_soft)
+
     return {'f_vec': quadruple_well_vec,
             'f_grad_vec': quadruple_well_grad_vec,
             'particle_init': [[-crit_value-0.2, -crit_value+0.2], [crit_value-0.2, crit_value+0.2]],
             'set': [[crit_value-0.2, crit_value+0.2], [-crit_value-0.2, -crit_value+0.2]],
-            'bounds': [[-0.5-np.sqrt(A), np.sqrt(A)+0.5], [-0.5-np.sqrt(A), np.sqrt(A)+0.5]],
+            'bounds': [[-crit_value-margin, crit_value+margin], [-crit_value-margin, crit_value+margin]],
             'critical_points': critical_points}
 
 
@@ -254,6 +267,11 @@ def high_dim_ackley_function_setting(
 
         return term1_grad + term2_grad
 
+    # bounds=[-10,10] is not an arbitrary heuristic: the cosine term's local-minima lattice has
+    # period 2*pi/c = 1 (at the default c=2*pi), so [-10,10] spans ~20 periods per dimension --
+    # deliberately compact (matches the paper's own framing of Ackley as "a compact domain
+    # containing an exponential number of local minima"), with dimension `d` -- not domain size --
+    # driving the actual difficulty scaling as this setting is swept to higher d.
     return {
         'f_vec': ackley_vec,
         'f_grad_vec': ackley_grad_vec,

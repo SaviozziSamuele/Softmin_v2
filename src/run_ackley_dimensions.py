@@ -70,8 +70,26 @@ def worker_task(args):
     # step budget), while beta=10.0 (the class default) succeeded in ~92,600 steps, matching
     # beta=30/50's performance almost exactly (beta=3 also worked, marginally slower) -- the same
     # "smaller beta looks fairer but is actually much slower or fails outright" pattern found on
-    # every other benchmark tested. Kept explicit rather than left as a silent default.
+    # every other benchmark tested. Kept explicit rather than left as a silent default. (Not
+    # re-swept 2026-08-06 -- Ackley's own bounds/setup were only documented, not numerically
+    # changed, so this finding is unaffected by that session's benchmark corrections.)
     ACKLEY_SOFTMIN_BETA = 10.0
+
+    # Diagnostic-guided, 2026-08-06: CBO swept across the same 13-candidate (11 beta + 2 annealed
+    # schedule) grid as run_experiments_resumable.py. Genuine negative finding: every candidate
+    # times out (position_collapse or value_stagnation) at d=50 -- CBO cannot be tuned into working
+    # on this benchmark either. beta=10.0 kept as the literature-standard value.
+    ACKLEY_CBO_BETA = 10.0
+
+    # Diagnostic-guided, 2026-08-06: unlike CBO/Softmin, PSO's literature-standard "canonical
+    # constriction" default (0.729, 1.49445, 1.49445) was found to FAIL here -- times out via
+    # position_collapse at d=50, d=70, AND d=90 in direct testing. Sweeping 6 named (w, c1, c2)
+    # triples found two that actually escape: "Eberhart-Shi low-w" (0.4, 2.0, 2.0) and
+    # "social-weighted" (0.729, 1.0, 2.0); the former is faster at every dimension tested
+    # (d=50: step 311 vs 398; d=70: 656 vs 1835; d=90: 2538 vs 2607) and is adopted here. This
+    # reverses the paper's previous claim that PSO fails on Ackley -- see the corresponding
+    # \todo{} in main.tex pending the full sweep regeneration this change requires.
+    ACKLEY_PSO_W, ACKLEY_PSO_C1, ACKLEY_PSO_C2 = 0.4, 2.0, 2.0
     softmin = SoftminEnergyAdagrad(
         n=100, d=dimension, f=f_vec, df=f_grad_vec, bounds=bounds,
         name=f"SoftMin_ackley_function_dim{dimension}",
@@ -92,26 +110,26 @@ def worker_task(args):
     cbo = GradientAwareCBO(
         n=100, d=dimension, f=f_vec, df=f_grad_vec,
         bounds=bounds, learning_rate=lr, consensus_rate=1.0,
-        noise_intensity=np.sqrt(2 * noise_val), beta=10.0
+        noise_intensity=np.sqrt(2 * noise_val), beta=ACKLEY_CBO_BETA
     )
     cbo_annealed = GradientAwareCBO(
         n=100, d=dimension, f=f_vec, df=f_grad_vec,
         bounds=bounds, learning_rate=lr, consensus_rate=1.0,
-        noise_intensity=np.sqrt(2 * noise_val), beta=10.0, beta_growth=CBO_BETA_GROWTH
+        noise_intensity=np.sqrt(2 * noise_val), beta=ACKLEY_CBO_BETA, beta_growth=CBO_BETA_GROWTH
     )
 
     pso = GradientAwarePSO(
         n=100, d=dimension, f=f_vec, df=f_grad_vec,
-        bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
+        bounds=bounds, learning_rate=lr, w=ACKLEY_PSO_W, c1=ACKLEY_PSO_C1, c2=ACKLEY_PSO_C2
     )
 
     standard_cbo = CBO(
         n=100, d=dimension, f=f_vec, df=f_grad_vec,
-        bounds=bounds, learning_rate=lr, consensus_rate=1.0, noise_intensity=1.0, beta=10.0
+        bounds=bounds, learning_rate=lr, consensus_rate=1.0, noise_intensity=1.0, beta=ACKLEY_CBO_BETA
     )
     standard_pso = PSO(
         n=100, d=dimension, f=f_vec, df=f_grad_vec,
-        bounds=bounds, learning_rate=lr, w=0.729, c1=1.49445, c2=1.49445
+        bounds=bounds, learning_rate=lr, w=ACKLEY_PSO_W, c1=ACKLEY_PSO_C1, c2=ACKLEY_PSO_C2
     )
 
     # 5. Execute vectorized step loops. Each sim's early-stop status is read from

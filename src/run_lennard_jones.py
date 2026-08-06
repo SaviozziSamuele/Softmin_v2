@@ -43,6 +43,16 @@ TARGET_EPS = 1e-2
 # from Softmin's decaying beta) -- see run_ackley_dimensions.py for the same convention.
 CBO_BETA_GROWTH = 1.001
 
+# Diagnostic-guided, 2026-08-06: PSO's literature-standard default was found to fail on Ackley
+# (the other high-dimensional benchmark) and a retuned value ("Eberhart-Shi low-w") was adopted
+# there instead (see run_ackley_dimensions.py). Spot-checked the same retuned value here at N=13:
+# both configurations stop at the same step (value_stagnation, step 6000, within a 20,000-step
+# probe well short of this driver's real MAX_STEPS budget), but the retuned value reaches a
+# meaningfully better best_global_value (-39.45 vs. -38.68, closer to the true global min
+# -44.33) -- consistent with, not contradicting, the Ackley finding. Not a full LJ-scale sweep
+# (out of scope, same as Softmin's own LJ tuning -- see MAX_STEPS comment below).
+PSO_W, PSO_C1, PSO_C2 = 0.4, 2.0, 2.0
+
 N_ATOMS_LIST = [13, 38, 55, 75]
 SEEDS = range(30)  # LJ is O(N^2)/step vs. Ackley's O(d); fewer seeds are affordable.
 
@@ -150,7 +160,7 @@ def worker_task(args):
     )
     pso = GradientAwarePSO(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
-        learning_rate=LR, w=0.729, c1=1.49445, c2=1.49445,
+        learning_rate=LR, w=PSO_W, c1=PSO_C1, c2=PSO_C2,
     )
     standard_cbo = CBO(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
@@ -158,7 +168,7 @@ def worker_task(args):
     )
     standard_pso = PSO(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
-        learning_rate=LR, w=0.729, c1=1.49445, c2=1.49445,
+        learning_rate=LR, w=PSO_W, c1=PSO_C1, c2=PSO_C2,
     )
 
     algos = {
