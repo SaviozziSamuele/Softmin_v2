@@ -17,6 +17,54 @@ import matplotlib.animation as animation
 
 
 # ---------------------------------------------------------------------------
+# Shared baseline label/color/marker convention (Okabe-Ito colorblind-safe palette), so the
+# notebook's double-well/quadruple-well/Ackley/Lennard-Jones comparison cells don't each
+# hand-duplicate the same 8-9 label/color/marker triples (2026-08-07).
+# ---------------------------------------------------------------------------
+
+BASELINE_STYLE = {
+    'softmin':       ('SoftMin', '#0072B2', 'o'),
+    'softmin_decay': ('SoftMin Decay', '#F0E442', 'd'),
+    'sa':            ('Simulated Annealing', '#E69F00', 's'),
+    'langevin':      ('Langevin', '#000000', 'x'),
+    'cbo':           ('CBO', '#009E73', '^'),
+    'cbo_annealed':  ('CBO Annealed', '#56B4E9', 'v'),
+    'pso':           ('PSO', '#D55E00', 'D'),
+    'standard_cbo':  ('Standard CBO', '#CC79A7', 'P'),
+    'standard_pso':  ('Standard PSO', '#999999', 'X'),
+}
+
+
+def baseline_series(algo_names, filenames, status_filenames=None):
+    """Build a `series` list (for `plot_entry_time_comparison`/`plot_value_comparison`) from
+    `BASELINE_STYLE`.
+
+    `filenames` (and optional `status_filenames`) is either a single string template containing
+    '{p}' (reused for every algo, `.format(p=p)`-compatible with `plot_entry_time_comparison`
+    directly -- pass e.g. 'softmin_double_well_{p}.pkl'.format-ready with '{a}' substituted here
+    for the algo key), or a `{algo: '{p}'-templated string}` dict for benchmarks whose per-algo
+    filenames aren't a uniform pattern (e.g. Ackley's `FILENAME_BY_ALGO`, which capitalizes each
+    algo's prefix differently -- import the driver's own dict rather than re-deriving the mapping
+    here, so the notebook can't silently drift from what the driver actually writes).
+    """
+    def _resolve(spec, a):
+        if spec is None:
+            return None
+        return spec[a] if isinstance(spec, dict) else spec.format(a=a, p='{p}')
+
+    series = []
+    for a in algo_names:
+        label, color, marker = BASELINE_STYLE[a]
+        s = {'label': label, 'filename_template': _resolve(filenames, a),
+             'color': color, 'marker': marker}
+        status_template = _resolve(status_filenames, a)
+        if status_template is not None:
+            s['status_filename_template'] = status_template
+        series.append(s)
+    return series
+
+
+# ---------------------------------------------------------------------------
 # Simulation landscape/particle plotting
 # ---------------------------------------------------------------------------
 
@@ -191,7 +239,8 @@ def _asymmetric_errorbars(mean, q1, q3):
 
 
 def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean Entry Time",
-                                title="", yscale="log", grid=False, figsize=(10, 6), params=None):
+                                title="", yscale="log", grid=False, figsize=(10, 6), params=None,
+                                min_reached_frac=0.0):
     """Plot mean (+/- IQR) entry time vs. a swept parameter for several methods.
 
     Args:
@@ -199,11 +248,23 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         results_dir: directory containing the `.pkl` files (each an array of entry times).
         series: list of dicts, one per method, with keys:
             label, filename_template (str.format(p=value)), color, marker (optional, default 'o'),
-            mask_below (optional float: only plot points whose mean is below this cutoff,
-            matching the "drop points that timed out" masking used in the original notebook).
+            status_filename_template (optional, str.format(p=value): parallel per-seed status
+            strings, e.g. produced by a second reconstruct_pkl_files_from_csv(value_transform=str)
+            call against the *_status CSV columns -- see run_experiments_resumable.py. When given,
+            each point's mean/IQR is computed only over the seeds whose status is
+            'target_reached', so a run that never escaped can't drag the mean toward the
+            max_steps*lr timeout sentinel (2026-08-07: replaces the old point-level `mask_below`
+            numeric cutoff, which silently stopped matching the sentinel once MAX_STEPS changed --
+            see the plan's B3 finding).
+            mask_below (optional float, legacy fallback for series with no status pkl available:
+            only plot points whose mean is below this cutoff).
         params: sequence used to build each filename (one .pkl per entry, in the same order as
             `x`), when it differs from the x-axis values themselves (e.g. the sweep is indexed
             by delta/A but plotted against a derived barrier height). Defaults to `x`.
+        min_reached_frac: if a series has status data, drop any point where the reached-fraction
+            (seeds with status=='target_reached' / total seeds) is below this threshold, even if
+            the (possibly small-sample) mean of the reached seeds looks fine -- avoids a single
+            lucky seed out of 100 producing a misleadingly confident-looking point.
         xlabel, ylabel, title, yscale, grid, figsize: standard matplotlib figure options.
 
     Returns:
@@ -214,20 +275,38 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
     params = x if params is None else list(params)
 
     for s in series:
-        means, q1s, q3s = [], [], []
+        means, q1s, q3s, keep = [], [], [], []
+        status_template = s.get('status_filename_template')
         for p in params:
             filename = os.path.join(results_dir, s['filename_template'].format(p=p))
             with open(filename, "rb") as f:
-                times = pkl.load(f)
-            means.append(np.mean(times))
-            q1s.append(np.percentile(times, 25))
-            q3s.append(np.percentile(times, 75))
+                times = np.asarray(pkl.load(f))
+
+            if status_template is not None:
+                status_filename = os.path.join(results_dir, status_template.format(p=p))
+                with open(status_filename, "rb") as f:
+                    statuses = np.asarray(pkl.load(f))
+                reached = statuses == 'target_reached'
+                reached_frac = float(np.mean(reached)) if reached.size else 0.0
+                point_times = times[reached]
+                point_ok = reached_frac >= min_reached_frac and point_times.size > 0
+            else:
+                point_times = times
+                point_ok = True
+
+            means.append(np.mean(point_times) if point_ok else np.nan)
+            q1s.append(np.percentile(point_times, 25) if point_ok else np.nan)
+            q3s.append(np.percentile(point_times, 75) if point_ok else np.nan)
+            keep.append(point_ok)
 
         means = np.asarray(means, dtype=float)
         err = _asymmetric_errorbars(means, q1s, q3s)
+        mask = np.asarray(keep, dtype=bool)
 
-        mask_below = s.get('mask_below')
-        mask = np.ones(x.shape, dtype=bool) if mask_below is None else means < mask_below
+        if status_template is None:
+            mask_below = s.get('mask_below')
+            if mask_below is not None:
+                mask = mask & (means < mask_below)
 
         ax.errorbar(x[mask], means[mask], yerr=err[:, mask], label=s['label'],
                     marker=s.get('marker', 'o'), color=s.get('color'), capsize=5, linestyle='-')

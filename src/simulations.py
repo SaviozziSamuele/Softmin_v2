@@ -17,8 +17,6 @@ from typing import Any, Callable, List, Literal, Optional, Union
 
 import numpy as np
 
-import viz
-
 N_CPU = mp.cpu_count()
 
 # Configure production-grade logging
@@ -127,16 +125,17 @@ class Simulation(ABC):
         logger.info(f"Initialized Simulation '{self.name}' with {self.n} particles in {self.d}D space.")
 
     def _eval_grad(self, positions: np.ndarray) -> np.ndarray:
-        """Evaluates df(positions) and counts the call. Subclasses should call this instead of
-        `self.df(...)` directly from within `step()`, so gradient-free methods (which never call
-        it) naturally report zero gradient evaluations."""
-        self.n_gradient_evals += 1
+        """Evaluates df(positions) and counts one gradient evaluation per particle (the currency
+        a reviewer means by "gradient evaluations", not one per vectorized call). Subclasses
+        should call this instead of `self.df(...)` directly from within `step()`, so gradient-free
+        methods (which never call it) naturally report zero gradient evaluations."""
+        self.n_gradient_evals += positions.shape[0]
         return self.df(positions)
 
     def _eval_obj(self, positions: np.ndarray) -> np.ndarray:
-        """Evaluates f(positions) and counts the call. Subclasses should call this instead of
-        `self.f(...)` directly from within `step()`."""
-        self.n_objective_evals += 1
+        """Evaluates f(positions) and counts one objective evaluation per particle. Subclasses
+        should call this instead of `self.f(...)` directly from within `step()`."""
+        self.n_objective_evals += positions.shape[0]
         return self.f(positions)
 
     @abstractmethod
@@ -163,39 +162,54 @@ class Simulation(ABC):
         stagnation_rtol: float,
         stagnation_atol: float,
         stagnation_state: dict,
+        stagnation_stride: int = 1,
     ) -> Optional[str]:
         """Checks both early-stop mechanisms at a checkpoint step; returns the stop reason
         ('position_collapse' or 'value_stagnation') if either fires, else None.
 
         `position_collapse`: the whole swarm has physically collapsed to a single point (e.g.
         CBO's consensus dynamics, whose diffusion noise vanishes as particles approach consensus).
-        `value_stagnation`: `self.best_global_value` hasn't improved beyond tolerance in
-        `stagnation_patience` consecutive checks -- catches a swarm that has stopped making
-        progress WITHOUT collapsing to a point (e.g. PSO: once velocity decays to ~0, particles
-        freeze at their individual last positions, which can stay spread out indefinitely).
+        Checked every call (every `early_stop_check_interval` steps) -- cheap, and fast detection
+        matters: CBO/PSO collapse within 1000-14000 steps in practice, so coarsening this check
+        would waste real compute across every collapsed run in a sweep.
+
+        `value_stagnation`: `self.best_global_value` hasn't improved beyond tolerance across
+        `stagnation_patience` consecutive stagnation *comparisons*, each `stagnation_stride` calls
+        apart (i.e. every `stagnation_stride * early_stop_check_interval` steps) -- catches a swarm
+        that has stopped making progress WITHOUT collapsing to a point (e.g. PSO: once velocity
+        decays to ~0, particles freeze at their individual last positions, which can stay spread
+        out indefinitely). `stagnation_stride > 1` (2026-08-07) decouples this from the frequent
+        collapse check: comparing over a longer window makes the flat-detection robust to genuine
+        but slow drift that a short window's rtol/atol could mistake for noise (a real, monotonic
+        decrease can integrate to something clearly non-flat over 50,000 steps while looking flat
+        over any single 1,000-step slice of it) -- this is what let quadruple_well A=30's genuine
+        ~116,000-step-delayed escape get away from a naive short-window reading in the first place.
         `best_global_value` is monotonically non-increasing by construction in every subclass, so
         "improved" reduces to a single one-directional np.isclose check -- a flat reading can never
         be an artifact of noise pushing the value back up.
 
         `stagnation_state` is a plain dict owned by the caller (not `self`), holding
-        {'reference_value', 'stale_checkpoints'} across checkpoints, so nested step()-driving loops
-        elsewhere can't collide with it.
+        {'reference_value', 'stale_checkpoints', 'calls_since_compare'} across checkpoints, so
+        nested step()-driving loops elsewhere can't collide with it.
         """
         if abort_on_collapse and np.max(np.std(self.particles, axis=0)) < 1e-6:
             return "position_collapse"
 
         if abort_on_stagnation:
-            current = self.best_global_value
-            reference = stagnation_state.get('reference_value')
-            if reference is None or not np.isclose(
-                current, reference, rtol=stagnation_rtol, atol=stagnation_atol
-            ):
-                stagnation_state['reference_value'] = current
-                stagnation_state['stale_checkpoints'] = 0
-            else:
-                stagnation_state['stale_checkpoints'] += 1
-                if stagnation_state['stale_checkpoints'] >= stagnation_patience:
-                    return "value_stagnation"
+            stagnation_state['calls_since_compare'] = stagnation_state.get('calls_since_compare', 0) + 1
+            if stagnation_state['calls_since_compare'] >= stagnation_stride:
+                stagnation_state['calls_since_compare'] = 0
+                current = self.best_global_value
+                reference = stagnation_state.get('reference_value')
+                if reference is None or not np.isclose(
+                    current, reference, rtol=stagnation_rtol, atol=stagnation_atol
+                ):
+                    stagnation_state['reference_value'] = current
+                    stagnation_state['stale_checkpoints'] = 0
+                else:
+                    stagnation_state['stale_checkpoints'] += 1
+                    if stagnation_state['stale_checkpoints'] >= stagnation_patience:
+                        return "value_stagnation"
 
         return None
 
@@ -205,10 +219,24 @@ class Simulation(ABC):
         max_steps: int = 10_000,
         abort_on_collapse: bool = True,
         abort_on_stagnation: bool = True,
-        stagnation_patience: int = 5,
+        # 5 -> 50 (2026-08-07, plan's B2 finding) -> 10 w/ stagnation_stride=50 (2026-08-07, same
+        # day, second revision): patience=50 at the old stride=1 (50,000 steps total) still
+        # false-aborted a genuine Softmin escape at quadruple_well A=30 -- best_global_value
+        # plateaus 30k-~116k steps, then resumes and reaches target at step 116,141 (verified by
+        # disabling early-stop entirely and running uncapped). Fixed total budget stays 500,000
+        # steps (10 * 50 * 1000), but restructured as fewer, longer-baseline comparisons rather
+        # than more short ones: comparing over a 50,000-step window is robust to genuine-but-slow
+        # drift that looks flat within any single 1,000-step slice of it, which is closer to what
+        # actually happened here (see `_check_early_stop`'s docstring). Since SA's documented
+        # delta>=25 "failure" was also a value_stagnation abort under the old parametrization,
+        # don't trust any pre-2026-08-07-second-revision negative result gated on value_stagnation
+        # without re-checking it under the new default -- see run_experiments_resumable.py's
+        # SA_INITIAL_TEMPERATURE comment for the re-check.
+        stagnation_patience: int = 10,
         stagnation_rtol: float = 1e-4,
         stagnation_atol: float = 1e-8,
         early_stop_check_interval: int = 1000,
+        stagnation_stride: int = 50,
     ) -> float:
         """
         Computes the first entry time into a target region using fully vectorized checks.
@@ -247,7 +275,7 @@ class Simulation(ABC):
             if i % early_stop_check_interval == 0:
                 reason = self._check_early_stop(
                     abort_on_collapse, abort_on_stagnation, stagnation_patience,
-                    stagnation_rtol, stagnation_atol, stagnation_state,
+                    stagnation_rtol, stagnation_atol, stagnation_state, stagnation_stride,
                 )
                 if reason is not None:
                     logger.info(f"Early stop ({reason}) at step {i}; swarm is not going to reach the target.")
@@ -267,10 +295,12 @@ class Simulation(ABC):
         abort_on_collapse: bool = True,
         checkpoints: Optional[List[int]] = None,
         abort_on_stagnation: bool = True,
-        stagnation_patience: int = 5,
+        # See first_entry_time's matching comment for the 5->50->10(stride=50) history.
+        stagnation_patience: int = 10,
         stagnation_rtol: float = 1e-4,
         stagnation_atol: float = 1e-8,
         early_stop_check_interval: int = 1000,
+        stagnation_stride: int = 50,
     ) -> float:
         """
         Value-space analogue of `first_entry_time`: returns the first step at which
@@ -316,7 +346,7 @@ class Simulation(ABC):
             if i % early_stop_check_interval == 0:
                 reason = self._check_early_stop(
                     abort_on_collapse, abort_on_stagnation, stagnation_patience,
-                    stagnation_rtol, stagnation_atol, stagnation_state,
+                    stagnation_rtol, stagnation_atol, stagnation_state, stagnation_stride,
                 )
                 if reason is not None:
                     logger.info(f"Early stop ({reason}) at step {i}; swarm is not going to reach the target.")
@@ -357,6 +387,9 @@ class Simulation(ABC):
         self.n_steps = 0
 
     def plot(self, path="", make_gif=False, **kwargs):
+        # Imported lazily so `import simulations` (and every mp.Pool worker that does it) doesn't
+        # pull in matplotlib -- only actual plotting needs it.
+        import viz
         viz.plot_simulation(self, path=path, make_gif=make_gif, **kwargs)
 
 
@@ -381,6 +414,7 @@ class SoftminEnergyAdagrad(Simulation):
         noise: Optional[str] = "normal",
         adaptive_lr: bool = True,
         track_prefactor_history: bool = False,
+        track_energy_history: bool = False,
         prefactor_mode: Literal["signed", "positive_part", "absolute"] = "signed"
     ):
         # Resolve mutable defaults safely
@@ -423,9 +457,14 @@ class SoftminEnergyAdagrad(Simulation):
         self.track_prefactor_history = track_prefactor_history
         self.prefactor_history = [] if track_prefactor_history else None
 
-        # Initialize energy metrics safely
+        # Initialize energy metrics safely. `_last_J` is the scalar the dynamics actually reads
+        # each step; `Js` is an opt-in full history (like `prefactor_history`) for diagnostics
+        # that want it (e.g. hyperparameter_diagnostics.py) -- unbounded at production step counts
+        # (up to 1e7), so it is never accumulated unless explicitly requested.
         initial_energy = self._compute_softmin_energy(self.values)
-        self.Js = [initial_energy]
+        self._last_J = initial_energy
+        self.track_energy_history = track_energy_history
+        self.Js = [initial_energy] if track_energy_history else None
         self.history_eq_values = [1.0 / self.beta + initial_energy]
 
     def _compute_softmin_energy(self, values: np.ndarray) -> float:
@@ -472,7 +511,7 @@ class SoftminEnergyAdagrad(Simulation):
     def step(self) -> None:
         """Performs a single vectorized simulation update."""
         gradient = self._eval_grad(self.particles)
-        energy = self.Js[-1]
+        energy = self._last_J
 
         # Compute stabilized weights
         weights = self._get_softmin_weights(self.values)
@@ -519,7 +558,9 @@ class SoftminEnergyAdagrad(Simulation):
 
         # Update metrics
         new_energy = self._compute_softmin_energy(self.values)
-        self.Js.append(new_energy)
+        self._last_J = new_energy
+        if self.track_energy_history:
+            self.Js.append(new_energy)
 
         # Track best configurations
         improved = self.values < self.best_values
@@ -538,7 +579,7 @@ class SoftminEnergyAdagrad(Simulation):
         for _ in range(n_steps):
             self.step()
             self.history.append(self.particles.copy())
-            self.history_eq_values.append(1.0 / self.beta + self.Js[-1])
+            self.history_eq_values.append(1.0 / self.beta + self._last_J)
 
         self.n_steps = n_steps
 
@@ -551,7 +592,8 @@ class SoftminEnergyAdagrad(Simulation):
         self.alpha = self.learning_rate
 
         initial_energy = self._compute_softmin_energy(self.best_values)
-        self.Js = [initial_energy]
+        self._last_J = initial_energy
+        self.Js = [initial_energy] if self.track_energy_history else None
         self.history_eq_values = [1.0 / self.beta + initial_energy]
         self.prefactor_history = [] if self.track_prefactor_history else None
 

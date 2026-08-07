@@ -2,11 +2,12 @@ import os
 
 import numpy as np
 
-from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv
+from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv, peak_rss_mb
 from potentials import high_dim_ackley_function_setting
 from simulations import (
     SoftminEnergyAdagrad,
     SimulatedAnnealing,
+    GaussianDiffusion,
     GradientAwareCBO,
     GradientAwarePSO,
     CBO,
@@ -16,20 +17,41 @@ from simulations import (
 RESULTS_CSV = 'results/master_high_dim_ackley_log_exp_on_dims.csv'
 MAX_STEPS = 10_000_000
 
+# Value-space target (2026-08-07), replacing the old fixed +-0.2-per-dimension coordinate box.
+# The box volume relative to the domain shrinks as (0.4/20)^d -- 1e-17 at d=10 down to 1e-153 at
+# d=90 -- conflating true landscape difficulty with a geometric artifact of a fixed-in-absolute-
+# terms box shrinking combinatorially with dimension (see the plan's B9 finding). Ackley's known
+# global minimum is exactly 0 regardless of d, so a scalar `first_value_time` target has no
+# dimension dependence at all: ACKLEY_TARGET_EPS=1.0 checked directly at d=50 (beta=10, pre-
+# recalibration probe) -- reached in ~116,000 steps, the same order of magnitude as the old
+# box-target's documented ~92,600 steps, so the two definitions aren't wildly apart in practice.
+ACKLEY_TARGET_VALUE = 1.0
+
 # Standard CBO's inverse temperature is annealed *upward* in the literature (opposite direction
 # from Softmin's decaying beta) -- see run_experiments_resumable.py for the same convention.
 CBO_BETA_GROWTH = 1.001
 
-ALGO_NAMES = ['softmin', 'sa', 'cbo', 'cbo_annealed', 'pso', 'standard_cbo', 'standard_pso']
+# 'langevin' added (2026-08-07): plain overdamped Langevin dynamics (GaussianDiffusion) at the
+# same noise_intensity=1.0 as Softmin -- see run_experiments_resumable.py's matching comment.
+ALGO_NAMES = ['softmin', 'sa', 'langevin', 'cbo', 'cbo_annealed', 'pso', 'standard_cbo', 'standard_pso']
 
 # Status columns (2026-08-06): trailing block, one per algorithm, recording each sim's honest
 # self._last_stop_reason -- see run_experiments_resumable.py's HEADER comment for the full
 # rationale (same pattern, applied here for consistency).
-HEADER = ['dimension', 'seed', *ALGO_NAMES, *(f'{a}_status' for a in ALGO_NAMES)]
+# Cost columns (2026-08-07): see run_experiments_resumable.py's matching HEADER comment -- this
+# sweep is also where cost-vs-dimension comes from, once these columns exist.
+HEADER = [
+    'dimension', 'seed', *ALGO_NAMES, *(f'{a}_status' for a in ALGO_NAMES),
+    *(f'{a}_gevals' for a in ALGO_NAMES),
+    *(f'{a}_oevals' for a in ALGO_NAMES),
+    *(f'{a}_secs' for a in ALGO_NAMES),
+    'peak_rss_mb',
+]
 
 FILENAME_BY_ALGO = {
     'softmin': "results/SoftMin_ackley_function_dim{dim}.pkl",
     'sa': "results/SimulatedAnnealing_ackley_function_dim{dim}.pkl",
+    'langevin': "results/Langevin_ackley_function_dim{dim}.pkl",
     'cbo': "results/CBO_ackley_function_dim{dim}.pkl",
     'cbo_annealed': "results/CBO_annealed_ackley_function_dim{dim}.pkl",
     'pso': "results/PSO_ackley_function_dim{dim}.pkl",
@@ -51,7 +73,6 @@ def worker_task(args):
     setting = high_dim_ackley_function_setting(d=dimension)
     f_vec = setting['f_vec']
     f_grad_vec = setting['f_grad_vec']
-    set_ = setting['set']
     bounds = setting['bounds']
 
     noise_val = 1.0
@@ -61,6 +82,12 @@ def worker_task(args):
     # d=50 run reached the target in ~60,000 steps (0.6% of budget); a 10x smaller lr needs
     # roughly 10x more steps for the same physical progress, still only ~6% of budget.
     lr = 0.001
+
+    # Shared initial swarm (2026-08-07) -- see run_experiments_resumable.py's matching comment.
+    x0 = np.random.uniform(
+        [p[0] for p in setting['particle_init']], [p[1] for p in setting['particle_init']],
+        (100, dimension)
+    )
 
     # 3. Instantiate Softmin with a fixed beta (switched from a beta_decay=0.999 schedule, per
     # user request). The beta*(f_i - J_beta) "ensemble fairness" gap diagnostic alone favored
@@ -78,8 +105,20 @@ def worker_task(args):
     # Diagnostic-guided, 2026-08-06: CBO swept across the same 13-candidate (11 beta + 2 annealed
     # schedule) grid as run_experiments_resumable.py. Genuine negative finding: every candidate
     # times out (position_collapse or value_stagnation) at d=50 -- CBO cannot be tuned into working
-    # on this benchmark either. beta=10.0 kept as the literature-standard value.
-    ACKLEY_CBO_BETA = 10.0
+    # on this benchmark either.
+    # ** PARTIALLY UNDER RE-VERIFICATION (2026-08-07) **: whichever candidates timed out via
+    # value_stagnation specifically (not position_collapse) were measured under the old, too-short
+    # stagnation_patience=50 default -- see simulations.py's matching comment for why that's now
+    # suspect. Not yet re-checked for CBO/Ackley specifically (unlike the SA delta>=25 double-well
+    # case, which is). PSO's Ackley failure is unaffected -- its comment below records
+    # position_collapse only, not value_stagnation.
+    # beta: 10.0 -> 0.01 (2026-08-07), matching run_experiments_resumable.py's CBO_BETA switch to
+    # the literature-typical 0.01-0.02 range -- see that file's matching comment for the direct
+    # empirical confirmation (across beta in {0.01...10.0}) that the collapse here is
+    # beta-independent, so this changes nothing about the negative result itself. Spot-checked here
+    # too: beta=0.01 and beta=10.0 collapse within one check-interval of each other at d=50
+    # (step 12000 vs 13000, both position_collapse).
+    ACKLEY_CBO_BETA = 0.01
 
     # Diagnostic-guided, 2026-08-06: unlike CBO/Softmin, PSO's literature-standard "canonical
     # constriction" default (0.729, 1.49445, 1.49445) was found to FAIL here -- times out via
@@ -99,12 +138,25 @@ def worker_task(args):
 
     # 4. Instantiate Simulated Annealing (cooling_rate=0.9999 diagnostic-confirmed healthy for
     # this benchmark -- t_star/entry_steps ~ 0.5 at d=50, unlike double_well/quadruple_well -- so
-    # left unchanged, see run_experiments_resumable.py for where it needed to change)
+    # left unchanged, see run_experiments_resumable.py for where it needed to change).
+    # initial_temperature=10 also left unchanged (2026-08-07) -- NOT the same validated choice as
+    # run_experiments_resumable.py's SA_INITIAL_TEMPERATURE=14.0283. The identical
+    # initial-acceptance-ratio calibration was attempted here too (see
+    # hyperparameter_diagnostics.py's Ackley T0 section) but was inconclusive even at a 100,000-
+    # step probe (5x the wells' budget): every T0 candidate tested still failed to reach the
+    # target, so nothing validated actually beats this default. Kept as an honest "not yet
+    # resolved" rather than picking a number a probe couldn't support.
     sa = SimulatedAnnealing(
         n=100, d=dimension, f=f_vec, df=f_grad_vec, bounds=bounds,
         name=f"SimulatedAnnealing_ackley_function_dim{dimension}",
         learning_rate=lr, cooling_rate=0.9999, noise=1.0,
         cooling_schedule="geometric", initial_temperature=10.0
+    )
+
+    langevin = GaussianDiffusion(
+        n=100, d=dimension, f=f_vec, df=f_grad_vec, bounds=bounds,
+        name=f"Langevin_ackley_function_dim{dimension}",
+        learning_rate=lr, noise=1.0,
     )
 
     cbo = GradientAwareCBO(
@@ -135,18 +187,25 @@ def worker_task(args):
     # 5. Execute vectorized step loops. Each sim's early-stop status is read from
     # self._last_stop_reason right after the call (see run_experiments_resumable.py).
     algos = {
-        'softmin': softmin, 'sa': sa, 'cbo': cbo, 'cbo_annealed': cbo_annealed,
+        'softmin': softmin, 'sa': sa, 'langevin': langevin, 'cbo': cbo, 'cbo_annealed': cbo_annealed,
         'pso': pso, 'standard_cbo': standard_cbo, 'standard_pso': standard_pso,
     }
+    for sim in algos.values():
+        sim.reset(particle_init=x0)
+
     times = {}
     statuses = {}
     for name, sim in algos.items():
-        times[name] = sim.first_entry_time(target_set=set_, max_steps=MAX_STEPS)
+        times[name] = sim.first_value_time(target_value=ACKLEY_TARGET_VALUE, max_steps=MAX_STEPS)
         statuses[name] = sim._last_stop_reason
 
     return (dimension, seed,
             *(times[a] for a in ALGO_NAMES),
-            *(statuses[a] for a in ALGO_NAMES))
+            *(statuses[a] for a in ALGO_NAMES),
+            *(algos[a].n_gradient_evals for a in ALGO_NAMES),
+            *(algos[a].n_objective_evals for a in ALGO_NAMES),
+            *(algos[a].wall_clock_seconds for a in ALGO_NAMES),
+            peak_rss_mb())
 
 
 def task_key(t):
@@ -160,6 +219,11 @@ def row_key(row):
 def filename_for(key, algo):
     (dimension,) = key
     return FILENAME_BY_ALGO[algo].format(dim=dimension)
+
+
+def filename_for_status(key, algo):
+    (dimension,) = key
+    return f"results/{algo}_ackley_function_dim{dimension}_status.pkl"
 
 
 if __name__ == '__main__':
@@ -185,4 +249,14 @@ if __name__ == '__main__':
         value_start=2,      # skip seed (index 1)
         algo_names=ALGO_NAMES,
         filename_fn=filename_for,
+    )
+
+    # Status pkls (2026-08-07) -- see run_experiments_resumable.py's matching comment.
+    reconstruct_pkl_files_from_csv(
+        results_csv=RESULTS_CSV,
+        key_indices=[0],
+        value_start=2 + len(ALGO_NAMES),
+        algo_names=ALGO_NAMES,
+        filename_fn=filename_for_status,
+        value_transform=str,
     )

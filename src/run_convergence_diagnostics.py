@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 
-from experiments import run_resumable_pool
+from experiments import run_resumable_pool, peak_rss_mb
 from potentials import asymmetric_double_well
 from simulations import SoftminEnergyAdagrad
 
@@ -25,6 +25,11 @@ RESULTS_CSV = 'results/master_convergence_diagnostics.csv'
 TILT = 0.05
 BETA = 2.0
 DELTAS = [3, 4]
+
+# Still `first_entry_time` (coordinate-space box target), not switched to `first_value_time` --
+# same reasoning as run_theory_verification.py's matching comment: this driver validates the same
+# state-space Theorem 3.1 exit-time statement, where "escape" means entering a spatial region, not
+# crossing a value threshold.
 
 BASE_SIGMA = 0.05
 BASE_LR = 0.01
@@ -54,7 +59,10 @@ T_MAX = 20_000.0
 # documents relying on) is unaffected and stays on.
 ABORT_ON_STAGNATION = False
 
-HEADER = ['sweep', 'delta', 'sigma', 'lr', 'n', 'seed', 'tau', 'status']
+# Cost columns (2026-08-07): this is where cost-vs-n comes from (the n_particles sweep already
+# varies particle count directly) -- see run_experiments_resumable.py's matching HEADER comment.
+HEADER = ['sweep', 'delta', 'sigma', 'lr', 'n', 'seed', 'tau', 'status',
+          'gevals', 'oevals', 'secs', 'peak_rss_mb']
 
 
 def worker_task(args):
@@ -79,7 +87,8 @@ def worker_task(args):
         target_set=setting['set'], max_steps=max_steps, abort_on_stagnation=ABORT_ON_STAGNATION,
     )
 
-    return (sweep, delta, sigma, lr, n, seed, tau, sim._last_stop_reason)
+    return (sweep, delta, sigma, lr, n, seed, tau, sim._last_stop_reason,
+            sim.n_gradient_evals, sim.n_objective_evals, sim.wall_clock_seconds, peak_rss_mb())
 
 
 def task_key(t):
@@ -88,26 +97,42 @@ def task_key(t):
 
 
 def row_key(row):
-    sweep, delta, sigma, lr, n, seed, tau, status = row
+    sweep, delta, sigma, lr, n, seed = row[:6]  # trailing cost columns not needed for the key
     return (sweep, float(delta), float(sigma), float(lr), int(n), int(seed))
 
 
 if __name__ == '__main__':
     os.makedirs('results', exist_ok=True)
 
+    # (2026-08-07) BASE_SIGMA/BASE_LR/BASE_N are each a member of their own sweep list, so the
+    # naive Cartesian product below used to emit three bit-identical tasks per delta/seed --
+    # ('sigma', delta, BASE_SIGMA, BASE_LR, BASE_N, seed), ('lr', delta, BASE_SIGMA, BASE_LR,
+    # BASE_N, seed), ('n_particles', delta, BASE_SIGMA, BASE_LR, BASE_N, seed) -- three distinct
+    # task keys (task_key includes `sweep`) with identical simulation inputs *and* identical
+    # seeds, so identical tau: 2 deltas x 100 seeds x 2 redundant copies = 400 wasted full-length
+    # runs, and the three sweeps' baseline points were perfectly correlated instead of independent
+    # observations. Fixed: the shared point is now computed once, under its own 'baseline' sweep
+    # label, and each axis excludes its own value equal to the shared baseline. The notebook cell
+    # that plots each axis's tau-vs-parameter curve must pull the point at
+    # (sigma=BASE_SIGMA)/(lr=BASE_LR)/(n=BASE_N) from the 'baseline' group, not expect it inside
+    # 'sigma'/'lr'/'n_particles' directly.
     all_tasks = []
     for delta in DELTAS:
         all_tasks.extend([
+            ('baseline', delta, BASE_SIGMA, BASE_LR, BASE_N, seed)
+            for seed in SEEDS
+        ])
+        all_tasks.extend([
             ('sigma', delta, sigma, BASE_LR, BASE_N, seed)
-            for sigma in SIGMA_VALUES for seed in SEEDS
+            for sigma in SIGMA_VALUES if sigma != BASE_SIGMA for seed in SEEDS
         ])
         all_tasks.extend([
             ('lr', delta, BASE_SIGMA, lr, BASE_N, seed)
-            for lr in LR_VALUES for seed in SEEDS
+            for lr in LR_VALUES if lr != BASE_LR for seed in SEEDS
         ])
         all_tasks.extend([
             ('n_particles', delta, BASE_SIGMA, BASE_LR, n, seed)
-            for n in N_VALUES for seed in SEEDS
+            for n in N_VALUES if n != BASE_N for seed in SEEDS
         ])
 
     run_resumable_pool(

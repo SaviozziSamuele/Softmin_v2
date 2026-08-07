@@ -18,6 +18,17 @@ MAX_STEPS = 10_000_000
 # symmetric barrier crossing.
 TILT = 0.05
 
+# Deliberately still `first_entry_time` (coordinate-space box target), NOT switched to
+# `first_value_time` like run_experiments_resumable.py/run_ackley_dimensions.py were (2026-08-07,
+# see the plan's B9 finding). Those two are a general "did the algorithm find a good solution"
+# comparison, where the target-box choice is an arbitrary operational metric with no independent
+# meaning -- fixed there because its width was never checked against each well's own scale.
+# This driver is different in kind: it validates Theorem 3.1, a Freidlin-Wentzell large-deviations
+# statement that is *inherently* about exit from a spatial domain (the notebook's own overlay
+# compares against a state-space quasipotential bound u(r)), not a value threshold. Redefining
+# "escape" here as a value-space event would silently change what's being verified against the
+# theorem's own definition, not just fix an arbitrary metric -- left untouched on purpose.
+
 # abort_on_stagnation is explicitly OFF here (2026-08-06), unlike every algorithm-comparison
 # driver: this file measures genuine barrier-crossing escape times at fixed, deliberately small
 # beta=2.0 and low noise_intensity -- a rare-event regime, not the "fast, continuously-improving

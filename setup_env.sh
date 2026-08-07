@@ -18,8 +18,8 @@ eval "$(conda shell.bash hook)"
 
 # /tmp on the login node fills up fast (root fs, ~1GB free) -- redirect pip's
 # temp/download dir to scratch before installing anything.
-mkdir -p /scratch/saviozzi/tmp
-export TMPDIR=/scratch/saviozzi/tmp
+mkdir -p "/scratch/$USER/tmp"
+export TMPDIR="/scratch/$USER/tmp"
 
 if [ ! -d "./venv" ]; then
     conda create -p ./venv python=3.11 -y
@@ -27,8 +27,9 @@ fi
 
 conda activate ./venv
 
-grep -v -i '^pywin32' src/requirements.txt > src/requirements_linux.txt
-pip install -r src/requirements_linux.txt
+# requirements.txt no longer carries pywin32 (or any other Windows-only / unrelated-project
+# package), so it installs directly on Linux -- no more stripping into a second file.
+pip install -r src/requirements.txt
 
 echo "Done. To activate this env in future sessions, run:"
 echo '  module load anaconda3 && eval "$(conda shell.bash hook)" && conda activate ./venv'

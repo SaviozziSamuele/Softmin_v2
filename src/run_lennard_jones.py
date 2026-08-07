@@ -3,11 +3,12 @@ import os
 import numpy as np
 from scipy.optimize import minimize
 
-from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv
+from experiments import run_resumable_pool, reconstruct_pkl_files_from_csv, peak_rss_mb
 from potentials import lennard_jones_cluster_setting
 from simulations import (
     SoftminEnergyAdagrad,
     SimulatedAnnealing,
+    GaussianDiffusion,
     GradientAwareCBO,
     GradientAwarePSO,
     CBO,
@@ -23,6 +24,14 @@ RESULTS_CSV = 'results/master_lennard_jones_log.csv'
 # every N in N_ATOMS_LIST feasible; smaller N finish far faster. Re-check with real cluster
 # timing if the projection turns out to be optimistic relative to Toeplitz's hardware.
 MAX_STEPS = 100_000
+
+# Equal-gradient-budget checkpoints (2026-08-07, reviewer demand (b)): best_global_value recorded
+# at each of these steps via first_value_time's `checkpoints=` hook, giving a best-value-vs-budget
+# curve per method instead of only a single hit-time/final-energy pair -- the comparison a reviewer
+# asking "is this actually cheaper, not just eventually better" wants. Log-spaced across the full
+# MAX_STEPS budget; last point is MAX_STEPS-1, not MAX_STEPS, since first_value_time's loop indexes
+# steps 0..max_steps-1 (see Simulation.first_value_time) and MAX_STEPS itself is never checked.
+CHECKPOINTS = [1000, 5000, 10000, 25000, 50000, MAX_STEPS - 1]
 
 # Learning rate and gradient-norm clip, set by the stiffness grid search
 # (.claude/scratch/smoke_test_lj.py): clipping only the LJ term per-atom (not the combined
@@ -43,6 +52,12 @@ TARGET_EPS = 1e-2
 # from Softmin's decaying beta) -- see run_ackley_dimensions.py for the same convention.
 CBO_BETA_GROWTH = 1.001
 
+# beta: 10.0 -> 0.01 (2026-08-07), matching the same switch in run_experiments_resumable.py and
+# run_ackley_dimensions.py -- 0.01-0.02 is CBO's literature-typical range (unlike Softmin's beta,
+# which has no comparable external convention), and empirically indistinguishable from 10.0 (see
+# run_experiments_resumable.py's matching comment for the direct confirmation across benchmarks).
+CBO_BETA = 0.01
+
 # Diagnostic-guided, 2026-08-06: PSO's literature-standard default was found to fail on Ackley
 # (the other high-dimensional benchmark) and a retuned value ("Eberhart-Shi low-w") was adopted
 # there instead (see run_ackley_dimensions.py). Spot-checked the same retuned value here at N=13:
@@ -56,7 +71,14 @@ PSO_W, PSO_C1, PSO_C2 = 0.4, 2.0, 2.0
 N_ATOMS_LIST = [13, 38, 55, 75]
 SEEDS = range(30)  # LJ is O(N^2)/step vs. Ackley's O(d); fewer seeds are affordable.
 
-ALGO_NAMES = ['softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
+# 'langevin' added (2026-08-07): plain overdamped Langevin dynamics (GaussianDiffusion) at the
+# same noise_intensity=1.0 as Softmin -- see run_experiments_resumable.py's matching comment.
+# 'softmin_decay' removed (2026-08-07): hyperparameter_diagnostics.py's beta-schedule sweep found
+# a decaying schedule never beats a well-chosen fixed beta on any benchmark tested, including a
+# spot check on this one (see hyperparameter_diagnostics.py's module comment) -- it was already
+# dropped from the wells/Ackley comparisons for the same reason (run_experiments_resumable.py's
+# matching HEADER comment); keeping it only here was an inconsistency, not a deliberate choice.
+ALGO_NAMES = ['softmin', 'sa', 'langevin', 'cbo', 'cbo_annealed', 'pso',
               'standard_cbo', 'standard_pso']
 
 # Status columns (2026-08-06): third trailing block, one per algorithm, recording each sim's
@@ -64,13 +86,20 @@ ALGO_NAMES = ['softmin', 'softmin_decay', 'sa', 'cbo', 'cbo_annealed', 'pso',
 # rationale. Appended after both the _t and _e blocks, so the existing zip-truncation trick this
 # file already relies on (see the reconstruct_pkl_files_from_csv calls below) keeps working
 # unmodified for both of them.
+# Cost columns (2026-08-07): gevals/oevals include _quench's L-BFGS-B f+grad calls (res.nfev/
+# res.njev), charged to whichever algorithm the quenched position came from -- the quench is real
+# additional compute spent to produce that algorithm's *reported* result, so excluding it would
+# undercount the true cost the same way the old per-call (not per-particle) counters did.
 HEADER = [
     'n_atoms', 'seed',
-    'softmin_t', 'softmin_decay_t', 'sa_t', 'cbo_t', 'cbo_annealed_t', 'pso_t',
-    'standard_cbo_t', 'standard_pso_t',
-    'softmin_e', 'softmin_decay_e', 'sa_e', 'cbo_e', 'cbo_annealed_e', 'pso_e',
-    'standard_cbo_e', 'standard_pso_e',
+    *(f'{a}_t' for a in ALGO_NAMES),
+    *(f'{a}_e' for a in ALGO_NAMES),
     *(f'{a}_status' for a in ALGO_NAMES),
+    *(f'{a}_gevals' for a in ALGO_NAMES),
+    *(f'{a}_oevals' for a in ALGO_NAMES),
+    *(f'{a}_secs' for a in ALGO_NAMES),
+    *(f'{a}_ckpt_{step}' for a in ALGO_NAMES for step in CHECKPOINTS),
+    'peak_rss_mb',
 ]
 
 FILENAME_BY_ALGO_T = {a: f"results/{a}_t_lennard_jones_n{{n_atoms}}.pkl" for a in ALGO_NAMES}
@@ -90,6 +119,10 @@ def _quench(quench_setting, position):
     gradient violates wherever clipping is active. Confirmed empirically -- quenching the exact
     same starting configuration with the clipped vs. unclipped gradient converged to visibly
     different (worse, for the clipped case) local minima, not just a slower path to the same one.
+
+    Returns (energy, nfev, njev) -- the evaluation counts (2026-08-07) so this genuine extra cost
+    of producing the reported quenched energy is charged to whichever algorithm it came from,
+    instead of silently uncounted (see the HEADER comment).
     """
     f_vec, f_grad_vec = quench_setting['f_vec'], quench_setting['f_grad_vec']
 
@@ -101,7 +134,7 @@ def _quench(quench_setting, position):
 
     res = minimize(f_scalar, position, jac=grad_scalar, method='L-BFGS-B',
                     options={'maxiter': 2000, 'ftol': 1e-14, 'gtol': 1e-10})
-    return res.fun
+    return res.fun, res.nfev, res.njev
 
 
 def worker_task(args):
@@ -138,24 +171,28 @@ def worker_task(args):
         name=f"SoftMin_lennard_jones_n{n_atoms}",
         initial_lr=LR, adaptive_lr=False, noise_intensity=1.0, noise="normal", beta_decay=None,
     )
-    softmin_decay = SoftminEnergyAdagrad(
-        n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
-        name=f"SoftMin_decay_lennard_jones_n{n_atoms}",
-        initial_lr=LR, adaptive_lr=False, noise_intensity=1.0, noise="normal", beta_decay=0.999,
-    )
+    # initial_temperature=10 kept unchanged (2026-08-07) -- same reasoning as
+    # run_ackley_dimensions.py's matching comment: the acceptance-ratio T0 calibration was
+    # inconclusive at Ackley's own d=50 probe (LJ shares this cooling_rate/T0 family, not the
+    # wells'), so nothing validated actually beats this default here either.
     sa = SimulatedAnnealing(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
         name=f"SimulatedAnnealing_lennard_jones_n{n_atoms}",
         learning_rate=LR, cooling_rate=0.9999, noise=1.0,
         cooling_schedule="geometric", initial_temperature=10.0,
     )
+    langevin = GaussianDiffusion(
+        n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
+        name=f"Langevin_lennard_jones_n{n_atoms}",
+        learning_rate=LR, noise=1.0,
+    )
     cbo = GradientAwareCBO(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
-        learning_rate=LR, consensus_rate=1.0, noise_intensity=np.sqrt(2.0), beta=10.0,
+        learning_rate=LR, consensus_rate=1.0, noise_intensity=np.sqrt(2.0), beta=CBO_BETA,
     )
     cbo_annealed = GradientAwareCBO(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
-        learning_rate=LR, consensus_rate=1.0, noise_intensity=np.sqrt(2.0), beta=10.0,
+        learning_rate=LR, consensus_rate=1.0, noise_intensity=np.sqrt(2.0), beta=CBO_BETA,
         beta_growth=CBO_BETA_GROWTH,
     )
     pso = GradientAwarePSO(
@@ -164,7 +201,7 @@ def worker_task(args):
     )
     standard_cbo = CBO(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
-        learning_rate=LR, consensus_rate=1.0, noise_intensity=1.0, beta=10.0,
+        learning_rate=LR, consensus_rate=1.0, noise_intensity=1.0, beta=CBO_BETA,
     )
     standard_pso = PSO(
         n=100, d=d, f=f_vec, df=f_grad_vec, bounds=bounds,
@@ -172,7 +209,7 @@ def worker_task(args):
     )
 
     algos = {
-        'softmin': softmin, 'softmin_decay': softmin_decay, 'sa': sa,
+        'softmin': softmin, 'sa': sa, 'langevin': langevin,
         'cbo': cbo, 'cbo_annealed': cbo_annealed, 'pso': pso,
         'standard_cbo': standard_cbo, 'standard_pso': standard_pso,
     }
@@ -181,18 +218,31 @@ def worker_task(args):
 
     # 4. Run + quench every algorithm. Status is read from self._last_stop_reason right after the
     # first_value_time call (see run_experiments_resumable.py for the full rationale).
+    # `checkpoints=CHECKPOINTS` populates sim.value_checkpoints (step -> best_global_value) for the
+    # equal-budget curves (see the HEADER/CHECKPOINTS comments).
     hit_times = {}
     quenched_energies = {}
     statuses = {}
     for name, sim in algos.items():
-        hit_times[name] = sim.first_value_time(target_value=target, max_steps=MAX_STEPS)
-        quenched_energies[name] = _quench(quench_setting, sim.best_global_position)
+        hit_times[name] = sim.first_value_time(
+            target_value=target, max_steps=MAX_STEPS, checkpoints=CHECKPOINTS,
+        )
+        quench_energy, quench_nfev, quench_njev = _quench(quench_setting, sim.best_global_position)
+        quenched_energies[name] = quench_energy
+        sim.n_objective_evals += quench_nfev
+        sim.n_gradient_evals += quench_njev
         statuses[name] = sim._last_stop_reason
 
     return (n_atoms, seed,
             *(hit_times[a] for a in ALGO_NAMES),
             *(quenched_energies[a] for a in ALGO_NAMES),
-            *(statuses[a] for a in ALGO_NAMES))
+            *(statuses[a] for a in ALGO_NAMES),
+            *(algos[a].n_gradient_evals for a in ALGO_NAMES),
+            *(algos[a].n_objective_evals for a in ALGO_NAMES),
+            *(algos[a].wall_clock_seconds for a in ALGO_NAMES),
+            *(algos[a].value_checkpoints.get(step, float('nan'))
+              for a in ALGO_NAMES for step in CHECKPOINTS),
+            peak_rss_mb())
 
 
 def task_key(t):
@@ -211,6 +261,11 @@ def filename_for_t(key, algo):
 def filename_for_e(key, algo):
     (n_atoms,) = key
     return FILENAME_BY_ALGO_E[algo].format(n_atoms=n_atoms)
+
+
+def filename_for_status(key, algo):
+    (n_atoms,) = key
+    return f"results/{algo}_status_lennard_jones_n{n_atoms}.pkl"
 
 
 if __name__ == '__main__':
@@ -243,4 +298,13 @@ if __name__ == '__main__':
         value_start=2 + len(ALGO_NAMES),  # skip seed + hit times; quenched energies start here
         algo_names=ALGO_NAMES,
         filename_fn=filename_for_e,
+    )
+    # Status pkls (2026-08-07) -- see run_experiments_resumable.py's matching comment.
+    reconstruct_pkl_files_from_csv(
+        results_csv=RESULTS_CSV,
+        key_indices=[0],
+        value_start=2 + 2 * len(ALGO_NAMES),  # skip seed + hit times + quenched energies
+        algo_names=ALGO_NAMES,
+        filename_fn=filename_for_status,
+        value_transform=str,
     )

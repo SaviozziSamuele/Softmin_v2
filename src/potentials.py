@@ -75,6 +75,16 @@ def asymmetric_double_well(delta, tilt):
     else:
         z_start, z_target = right, left
 
+    # Guaranteed by the branch above, but assert explicitly: this is the exact defect the switch
+    # from a symmetric double well to this asymmetric one was meant to fix (see the docstring),
+    # so a future edit that reintroduces symmetric parameters should fail loudly here, not produce
+    # a benchmark that silently has nothing suboptimal to escape from.
+    assert well(np.array([z_target])) < well(np.array([z_start])), (
+        f"asymmetric_double_well(delta={delta}, tilt={tilt}): target well is not strictly "
+        f"deeper than the start well."
+    )
+    depth_gap = float(well(np.array([z_start])) - well(np.array([z_target])))
+
     # f''(x) = 12x^2 - 2*delta (the tilt term is linear, so it drops out of the second
     # derivative) -- bounds margin scales with the true local curvature at each well, not a fixed
     # distance; see BOUNDS_MARGIN_LENGTHSCALES.
@@ -91,10 +101,31 @@ def asymmetric_double_well(delta, tilt):
         'z_start': z_start,
         'saddle': saddle,
         'z_target': z_target,
+        'depth_gap': depth_gap,
     }
 
 
 def unbalanced_quadruple_well_setting(A, delta):
+    """2D quartic potential f(x,y) = x^4+y^4-A(x^2+y^2)-delta*x*y.
+
+    `f` is symmetric under the x<->y swap (xy=yx), so its non-trivial stationary points split
+    into two families, each found in closed form by substituting y=+-x into grad f = 0:
+        diagonal      (x=y=+-r_diag),   r_diag = 0.5*sqrt(2A+delta)
+        anti-diagonal (x=-y=+-r_anti),  r_anti = 0.5*sqrt(2A-delta)
+    Each family's own two points ARE exact mirror images of each other (f(-x,-y)=f(x,y) always)
+    -- but the diagonal family and the anti-diagonal family sit at genuinely different depths
+    whenever delta != 0: f(r_diag,r_diag) - f(r_anti,-r_anti) = -A*delta (verified numerically).
+
+    A previous version placed BOTH `particle_init` and `set` on the anti-diagonal family (using
+    r_diag's formula but anti-diagonal coordinates), making them an exact mirror pair with zero
+    depth gap -- the 2D analogue of the defect `asymmetric_double_well`'s tilt term fixes for the
+    1D benchmark. Fixed here the same way: `particle_init` starts in the shallower diagonal well,
+    `set` targets the deeper anti-diagonal one, so every A has a genuinely suboptimal basin to
+    escape from. (The quartic system also has 4 additional real saddle points off both symmetry
+    axes, not used here -- `depth_gap`, not a saddle-based barrier, is this benchmark's difficulty
+    axis, matching how `asymmetric_double_well`'s notebook figure already uses a coordinate-space
+    proxy rather than a rigorous barrier height.)
+    """
     x, y = symbols('x y')
     f = x**4 + y**4 - A*(x**2 + y**2) - delta*x*y
     f_x = diff(f, x)
@@ -108,9 +139,6 @@ def unbalanced_quadruple_well_setting(A, delta):
     f_xx_num = lambdify((x, y), f_xx, modules='numpy')
     f_xy_num = lambdify((x, y), f_xy, modules='numpy')
 
-    crit_value = 0.5*np.sqrt(2*A+delta)
-    critical_points = solve([f_x, f_y], (x, y))
-
     def quadruple_well(x):
         return f_num(x[0], x[1])
 
@@ -120,28 +148,51 @@ def unbalanced_quadruple_well_setting(A, delta):
     quadruple_well_vec = np.vectorize(quadruple_well, signature='(n)->()')
     quadruple_well_grad_vec = np.vectorize(quadruple_well_grad, signature='(n)->(n)')
 
-    # Bounds margin scales with the true local curvature at the well (softest Hessian
-    # eigendirection), not a fixed distance or a separate ad hoc formula disconnected from
-    # crit_value -- see BOUNDS_MARGIN_LENGTHSCALES. At (crit_value, crit_value), the Hessian is
-    # [[f_xx, f_xy], [f_xy, f_xx]] by the function's own x<->y symmetry at this critical point;
-    # its eigenvalues are f_xx +- |f_xy|, so the softest one is f_xx - |f_xy|.
-    fxx_val = f_xx_num(crit_value, crit_value)
-    fxy_val = f_xy_num(crit_value, crit_value)
-    eig_soft = fxx_val - abs(fxy_val)
-    if eig_soft <= 0:
+    r_diag_sq = 2 * A + delta
+    r_anti_sq = 2 * A - delta
+    if r_diag_sq <= 0 or r_anti_sq <= 0:
         raise ValueError(
-            f"unbalanced_quadruple_well_setting(A={A}, delta={delta}) is degenerate: the softest "
-            f"Hessian eigenvalue at the well is {eig_soft} <= 0, so this isn't a genuine local "
-            f"minimum in that direction (at delta=-1, this happens exactly at A=1); increase A."
+            f"unbalanced_quadruple_well_setting(A={A}, delta={delta}): both critical-point "
+            f"families require 2A+delta>0 and 2A-delta>0 (got {r_diag_sq}, {r_anti_sq})."
         )
-    margin = _lengthscale_margin(eig_soft)
+    r_diag = 0.5 * np.sqrt(r_diag_sq)
+    r_anti = 0.5 * np.sqrt(r_anti_sq)
 
-    return {'f_vec': quadruple_well_vec,
-            'f_grad_vec': quadruple_well_grad_vec,
-            'particle_init': [[-crit_value-0.2, -crit_value+0.2], [crit_value-0.2, crit_value+0.2]],
-            'set': [[crit_value-0.2, crit_value+0.2], [-crit_value-0.2, -crit_value+0.2]],
-            'bounds': [[-crit_value-margin, crit_value+margin], [-crit_value-margin, crit_value+margin]],
-            'critical_points': critical_points}
+    # Curvature check at BOTH wells (not just the one bounds/targets used to derive from before):
+    # particles now genuinely need to start in one and find the other, so both must be real local
+    # minima. At each point the Hessian is [[f_xx, f_xy],[f_xy, f_xx]] by the function's own
+    # x<->y symmetry there, so its eigenvalues are f_xx +- |f_xy| and the softest is f_xx-|f_xy|.
+    # Degenerate at A=1 for the diagonal well when delta=-1 (softest eigenvalue 4A-4 hits zero
+    # there) -- the sweep's own first point.
+    eig_soft_diag = f_xx_num(r_diag, r_diag) - abs(f_xy_num(r_diag, r_diag))
+    eig_soft_anti = f_xx_num(r_anti, -r_anti) - abs(f_xy_num(r_anti, -r_anti))
+    if eig_soft_diag <= 0 or eig_soft_anti <= 0:
+        raise ValueError(
+            f"unbalanced_quadruple_well_setting(A={A}, delta={delta}) is degenerate: softest "
+            f"Hessian eigenvalue is {eig_soft_diag} at the diagonal well / {eig_soft_anti} at "
+            f"the anti-diagonal well (need both > 0); increase A."
+        )
+    margin = _lengthscale_margin(min(eig_soft_diag, eig_soft_anti))
+    outer = max(r_diag, r_anti) + margin
+
+    depth_gap = float(f_num(r_diag, r_diag) - f_num(r_anti, -r_anti))
+    if depth_gap <= 0:
+        raise ValueError(
+            f"unbalanced_quadruple_well_setting(A={A}, delta={delta}): diagonal well is not "
+            f"shallower than the anti-diagonal well (depth_gap={depth_gap} <= 0) -- 'set' would "
+            f"not be a genuinely suboptimal-basin escape target. Check the sign of delta."
+        )
+
+    return {
+        'f_vec': quadruple_well_vec,
+        'f_grad_vec': quadruple_well_grad_vec,
+        'particle_init': [[r_diag - 0.2, r_diag + 0.2], [r_diag - 0.2, r_diag + 0.2]],
+        'set': [[r_anti - 0.2, r_anti + 0.2], [-r_anti - 0.2, -r_anti + 0.2]],
+        'bounds': [[-outer, outer], [-outer, outer]],
+        'r_diag': r_diag,
+        'r_anti': r_anti,
+        'depth_gap': depth_gap,
+    }
 
 
 def low_dimensional_quadruple_well_setting(A, delta, dimension):
