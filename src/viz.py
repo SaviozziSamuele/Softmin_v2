@@ -238,9 +238,18 @@ def _asymmetric_errorbars(mean, q1, q3):
     return np.vstack([np.maximum(lower, 0), np.maximum(upper, 0)])
 
 
+# Points at or above this reached-fraction are treated as fully reliable and left unannotated;
+# below it (but still >= min_reached_frac, so still plotted) they get a small "NN% reached" label
+# so a caller skimming the figure can't mistake "reliable but not perfect" for "100% reliable" --
+# the two previously rendered identically once a point cleared min_reached_frac at all.
+RELIABLE_ANNOTATION_THRESHOLD = 0.9
+
+_DEFAULT_LEGEND_KWARGS = dict(fontsize=9, ncol=2, framealpha=0.9)
+
+
 def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean Entry Time",
-                                title="", yscale="log", grid=False, figsize=(10, 6), params=None,
-                                min_reached_frac=0.0):
+                                title="", yscale="log", grid=False, figsize=(11, 6), params=None,
+                                min_reached_frac=0.0, legend_kwargs=None):
     """Plot mean (+/- IQR) entry time vs. a swept parameter for several methods.
 
     Args:
@@ -264,7 +273,14 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         min_reached_frac: if a series has status data, drop any point where the reached-fraction
             (seeds with status=='target_reached' / total seeds) is below this threshold, even if
             the (possibly small-sample) mean of the reached seeds looks fine -- avoids a single
-            lucky seed out of 100 producing a misleadingly confident-looking point.
+            lucky seed out of 100 producing a misleadingly confident-looking point. Points that
+            clear this cutoff but are still below `RELIABLE_ANNOTATION_THRESHOLD` get a small
+            reached-fraction label so partial reliability stays visible even once plotted (2026:
+            survivorship-bias fix -- see the report that flagged points built from a handful of
+            lucky seeds rendering identically to points built from a full successful cohort).
+        legend_kwargs: dict merged over `_DEFAULT_LEGEND_KWARGS` (fontsize=9, ncol=2,
+            framealpha=0.9) and passed to `ax.legend()` -- the previous bare `ax.legend()` produced
+            an oversized single-column legend that crowded an 8-series plot's data.
         xlabel, ylabel, title, yscale, grid, figsize: standard matplotlib figure options.
 
     Returns:
@@ -275,7 +291,7 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
     params = x if params is None else list(params)
 
     for s in series:
-        means, q1s, q3s, keep = [], [], [], []
+        means, q1s, q3s, keep, reached_fracs = [], [], [], [], []
         status_template = s.get('status_filename_template')
         for p in params:
             filename = os.path.join(results_dir, s['filename_template'].format(p=p))
@@ -293,15 +309,18 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
             else:
                 point_times = times
                 point_ok = True
+                reached_frac = 1.0
 
             means.append(np.mean(point_times) if point_ok else np.nan)
             q1s.append(np.percentile(point_times, 25) if point_ok else np.nan)
             q3s.append(np.percentile(point_times, 75) if point_ok else np.nan)
             keep.append(point_ok)
+            reached_fracs.append(reached_frac)
 
         means = np.asarray(means, dtype=float)
         err = _asymmetric_errorbars(means, q1s, q3s)
         mask = np.asarray(keep, dtype=bool)
+        reached_fracs = np.asarray(reached_fracs, dtype=float)
 
         if status_template is None:
             mask_below = s.get('mask_below')
@@ -311,6 +330,12 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         ax.errorbar(x[mask], means[mask], yerr=err[:, mask], label=s['label'],
                     marker=s.get('marker', 'o'), color=s.get('color'), capsize=5, linestyle='-')
 
+        if status_template is not None:
+            for xi, yi, frac in zip(x[mask], means[mask], reached_fracs[mask]):
+                if frac < RELIABLE_ANNOTATION_THRESHOLD:
+                    ax.annotate(f"{frac * 100:.0f}%", (xi, yi), textcoords="offset points",
+                                xytext=(0, -11), ha="center", fontsize=6.5, color="#666666")
+
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -318,13 +343,13 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         ax.set_yscale(yscale)
     if grid:
         ax.grid()
-    ax.legend()
+    ax.legend(**{**_DEFAULT_LEGEND_KWARGS, **(legend_kwargs or {})})
     return fig, ax
 
 
 def plot_value_comparison(x, results_dir, series, xlabel, ylabel="Value", title="",
-                           yscale=None, grid=False, figsize=(10, 6), params=None,
-                           value_transform=None):
+                           yscale=None, grid=False, figsize=(11, 6), params=None,
+                           value_transform=None, legend_kwargs=None):
     """Plot mean (+/- IQR) of a value-space metric (e.g. quenched Lennard-Jones energy gap,
     re-evaluated RL return) vs. a swept parameter for several methods.
 
@@ -364,7 +389,7 @@ def plot_value_comparison(x, results_dir, series, xlabel, ylabel="Value", title=
         ax.set_yscale(yscale)
     if grid:
         ax.grid()
-    ax.legend()
+    ax.legend(**{**_DEFAULT_LEGEND_KWARGS, **(legend_kwargs or {})})
     return fig, ax
 
 
