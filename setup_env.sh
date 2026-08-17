@@ -5,13 +5,15 @@
 #   bash setup_env.sh
 #
 # Every session after that, just source the activation part:
-#   module load anaconda3
-#   eval "$(conda shell.bash hook)"
-#   conda activate ./venv
+#   cd src && module load anaconda3 && eval "$(conda shell.bash hook)" && conda activate ./venv
 
 set -e
 
-cd "$(dirname "$0")"
+# The job scripts cd into src/ and then `conda activate ./venv`, so the env must live at
+# src/venv, not at the repo root -- venv/ creation and activation both happen from inside src/
+# to match that exactly (2026-08-07: an env created at the repo-root path was silently unusable
+# by every job script, which look for it at src/venv).
+cd "$(dirname "$0")/src"
 
 module load anaconda3
 eval "$(conda shell.bash hook)"
@@ -29,7 +31,7 @@ conda activate ./venv
 
 # requirements.txt no longer carries pywin32 (or any other Windows-only / unrelated-project
 # package), so it installs directly on Linux -- no more stripping into a second file.
-pip install -r src/requirements.txt
+pip install -r requirements.txt
 
 echo "Done. To activate this env in future sessions, run:"
-echo '  module load anaconda3 && eval "$(conda shell.bash hook)" && conda activate ./venv'
+echo '  cd src && module load anaconda3 && eval "$(conda shell.bash hook)" && conda activate ./venv'
