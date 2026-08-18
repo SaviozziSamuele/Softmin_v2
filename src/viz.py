@@ -424,3 +424,63 @@ def plot_prefactor_dynamics(sim, figsize=(10, 6)):
     ax.set_title("Ascent-Descent Dynamics: per-particle effective learning rate")
     ax.legend()
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# Ablation mode distribution (violin/box) -- for ablation settings with no natural sweep axis
+# (a single fixed, hard dimension/cluster size), where a per-mode distribution plot is more
+# informative than collapsing each mode to a single mean +/- IQR point.
+# ---------------------------------------------------------------------------
+
+PREFACTOR_MODE_STYLE = {
+    'signed':        ('Signed (default)', '#0072B2'),
+    'positive_part': ('Positive part', '#E69F00'),
+    'absolute':      ('Absolute value', '#009E73'),
+}
+
+
+def plot_mode_distribution(datasets, ylabel, title="", kind="violin", figsize=(6, 5), modes=None):
+    """Plot the per-seed distribution of a scalar metric for each ascent-descent prefactor_mode
+    variant (see `SoftminEnergyAdagrad`'s `prefactor_mode` -- 'signed', 'positive_part',
+    'absolute').
+
+    Args:
+        datasets: {mode_name: array of per-seed values}.
+        ylabel, title: standard matplotlib labels.
+        kind: 'violin' (default) or 'box'.
+        modes: order to plot the modes in (defaults to `PREFACTOR_MODE_STYLE`'s own order,
+            filtered to whichever keys are actually present in `datasets`).
+
+    Returns:
+        (fig, ax)
+    """
+    modes = modes or [m for m in PREFACTOR_MODE_STYLE if m in datasets]
+    labels = [PREFACTOR_MODE_STYLE[m][0] for m in modes]
+    colors = [PREFACTOR_MODE_STYLE[m][1] for m in modes]
+    values = [np.asarray(datasets[m], dtype=float) for m in modes]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    positions = np.arange(1, len(modes) + 1)
+
+    if kind == "violin":
+        parts = ax.violinplot(values, positions=positions, showmeans=True, showmedians=False)
+        for body, color in zip(parts['bodies'], colors):
+            body.set_facecolor(color)
+            body.set_alpha(0.6)
+        for key in ('cbars', 'cmins', 'cmaxes', 'cmeans'):
+            if key in parts:
+                parts[key].set_color('black')
+    elif kind == "box":
+        bp = ax.boxplot(values, positions=positions, patch_artist=True)
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+    else:
+        raise ValueError("kind must be 'violin' or 'box'")
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    fig.tight_layout()
+    return fig, ax
