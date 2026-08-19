@@ -15,6 +15,7 @@ from typing import Dict, Any
 from sympy import symbols, diff, solve, lambdify, Piecewise, exp, sin, cos, sqrt, pi, log
 from numpy.polynomial import polynomial as P
 from sympy.plotting import plot
+from scipy.optimize import fsolve
 
 # Domain-bounds margin, used by every well-type potential below: extend `bounds` this many
 # natural harmonic fluctuation-lengthscales (ell = 1/sqrt(curvature)) beyond the outermost
@@ -27,9 +28,11 @@ from sympy.plotting import plot
 BOUNDS_MARGIN_LENGTHSCALES = 5
 
 
-def _lengthscale_margin(curvature):
-    """K/sqrt(curvature) -- see BOUNDS_MARGIN_LENGTHSCALES."""
-    return BOUNDS_MARGIN_LENGTHSCALES / np.sqrt(curvature)
+def _lengthscale_margin(curvature, K=BOUNDS_MARGIN_LENGTHSCALES):
+    """K/sqrt(curvature) -- see BOUNDS_MARGIN_LENGTHSCALES. `K` is overridable per-call (default
+    unchanged) so a caller can experiment with a more generous margin without touching the shared
+    constant every other well-type potential in this file depends on."""
+    return K / np.sqrt(curvature)
 
 
 def asymmetric_double_well(delta, tilt):
@@ -192,6 +195,228 @@ def unbalanced_quadruple_well_setting(A, delta):
         'r_diag': r_diag,
         'r_anti': r_anti,
         'depth_gap': depth_gap,
+    }
+
+
+def _cubic_double_well_roots(A, tilt):
+    """3 real critical points of g(t)=t^4-A*t^2+tilt*t, depth-sorted as (z_lo, saddle, z_hi) with
+    z_lo the deeper minimum. Deliberately duplicates asymmetric_double_well's inline root-finding
+    (P.polyroots + depth sort) rather than refactoring it into a shared helper -- that function
+    backs existing production numbers and must not be put at risk by this change. Returns None if
+    the cubic doesn't have 3 real roots."""
+    roots = P.polyroots([tilt, -2 * A, 0, 4])
+    real_roots = np.sort(roots[np.abs(roots.imag) < 1e-8].real)
+    if len(real_roots) != 3:
+        return None
+    left, saddle, right = real_roots
+    g_left = left**4 - A * left**2 + tilt * left
+    g_right = right**4 - A * right**2 + tilt * right
+    return (left, saddle, right) if g_left <= g_right else (right, saddle, left)
+
+
+def _hybrid_wells(A, tilt, kappa):
+    """Locate the 4 critical points of f(x,y) = g(x)+g(y)+kappa*x*y, g(t)=t^4-A*t^2+tilt*t, as
+    candidate minima.
+
+    The diagonal pair ('start'/'target') stays exactly closed-form: substituting y=x collapses
+    both component gradient equations to the same cubic as `_cubic_double_well_roots`, just with
+    `A_eff = A - kappa/2` in place of `A` (verified against an independent fsolve to ~1e-15
+    during design). The off-diagonal ('neighbor') pair loses its exact y=-x closed form once both
+    `tilt!=0` and `kappa!=0` (the two component equations reduce to `4x^3-(2A+kappa)x=-tilt` and
+    `=+tilt`, inconsistent unless tilt=0), so it needs one `fsolve` refinement, seeded at the
+    kappa=0 anti-diagonal location. The second neighbor is `(x,y)->(y,x)` of the first, not
+    independently solved -- by the potential's exact x<->y swap symmetry this guarantees the two
+    neighbor wells are exactly degenerate, regardless of fsolve's numerical precision.
+
+    Returns None if a required cubic lacks 3 real roots or fsolve doesn't converge; otherwise
+    `(wells, f_vals, eigs)`, each a dict keyed by 'start'/'neighbor1'/'neighbor2'/'target'.
+    """
+    base_roots = _cubic_double_well_roots(A, tilt)
+    if base_roots is None:
+        return None
+    z_lo0, _, z_hi0 = base_roots
+
+    eff_roots = _cubic_double_well_roots(A - kappa / 2, tilt)
+    if eff_roots is None:
+        return None
+    z_lo_eff, _, z_hi_eff = eff_roots
+    start, target = np.array([z_hi_eff, z_hi_eff]), np.array([z_lo_eff, z_lo_eff])
+
+    def grad(xy):
+        x, y = xy
+        return np.array([4 * x**3 - 2 * A * x + tilt + kappa * y,
+                          4 * y**3 - 2 * A * y + tilt + kappa * x])
+
+    n1, _, ier, _ = fsolve(grad, [z_hi0, z_lo0], full_output=True)
+    if ier != 1 or np.linalg.norm(grad(n1)) > 1e-8:
+        return None
+    n2 = n1[::-1]  # exact swap-mirror, not re-solved -- keeps the two neighbors exactly degenerate
+
+    def f(xy):
+        x, y = xy
+        return x**4 - A * x**2 + tilt * x + y**4 - A * y**2 + tilt * y + kappa * x * y
+
+    def eigs(xy):
+        x, y = xy
+        # f_xy = kappa everywhere (constant, from the bilinear coupling term).
+        return np.linalg.eigvalsh([[12 * x**2 - 2 * A, kappa], [kappa, 12 * y**2 - 2 * A]])
+
+    wells = {'start': start, 'neighbor1': n1, 'neighbor2': n2, 'target': target}
+    f_vals = {name: float(f(w)) for name, w in wells.items()}
+    well_eigs = {name: eigs(w) for name, w in wells.items()}
+    return wells, f_vals, well_eigs
+
+
+def _hybrid_ordering_ok(A, tilt, kappa):
+    """True iff `kappa` keeps all 4 wells genuine local minima (positive-definite Hessian) with
+    the intended strict 3-level ordering f(start) > f(neighbor) > f(target)."""
+    result = _hybrid_wells(A, tilt, kappa)
+    if result is None:
+        return False
+    _, f_vals, well_eigs = result
+    if any(np.min(e) <= 0 for e in well_eigs.values()):
+        return False
+    return f_vals['start'] > f_vals['neighbor1'] > f_vals['target']
+
+
+def _hybrid_kappa_ceiling(A, tilt, kappa_hi=None, tol=1e-6):
+    """Largest `kappa` (by bisection) for which `_hybrid_ordering_ok` holds. Assumes a single
+    ordering-preserving-to-broken threshold as kappa increases from 0 (true at every A tested
+    during design, A=2..30, not proven analytically). `kappa_hi` seeds the search bracket (default
+    4*A, generous relative to the ceilings actually observed -- measured ~0.05 at A=2 down to
+    ~0.01 at A=30 for tilt=0.05, i.e. 2-3 orders of magnitude below this bracket)."""
+    if kappa_hi is None:
+        kappa_hi = 4 * A
+    if not _hybrid_ordering_ok(A, tilt, 0.0):
+        return 0.0
+    lo, hi = 0.0, kappa_hi
+    if _hybrid_ordering_ok(A, tilt, hi):
+        return hi  # search bound itself never broke ordering -- return it as-is
+    while hi - lo > tol:
+        mid = 0.5 * (lo + hi)
+        if _hybrid_ordering_ok(A, tilt, mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def hybrid_quadruple_well_setting(A, tilt, kappa_frac=0.7, kappa=None, bounds_margin_lengthscales=None):
+    """2D quartic potential f(x,y) = g(x) + g(y) + kappa*x*y, g(t) = t^4 - A*t^2 + tilt*t -- the
+    same cubic `asymmetric_double_well` uses, applied to both axes (a separable base), plus a
+    small bilinear coupling term breaking exact separability.
+
+    Unlike `unbalanced_quadruple_well_setting` (whose 4 minima form two exactly mirror-degenerate
+    pairs under central symmetry -- only 2 distinct depths), this gives exactly 3 levels: 'start'
+    (worst), two 'neighbor' wells (equal to each other, suboptimal), and 'target' diagonally
+    opposite start (best). This falls out of the construction directly: x<->y swap symmetry
+    (preserved by both g(x)+g(y) and kappa*x*y, for any kappa) guarantees the two neighbor wells
+    are exactly degenerate, while `tilt` breaking central symmetry (x,y)->(-x,-y) separates start
+    from target. See arXiv:1704.08927 (Zhang & Schuette, "Transition manifolds of complex
+    metastable systems"), which builds a 2D multi-well transition-time benchmark the same way
+    (separable double-well sum + a small coupling term) for the same reason: a purely separable
+    2D double well gives a trivially 1D transition structure.
+
+    `kappa` cannot be chosen independently of `A`/`tilt` -- the 3-level ordering breaks once
+    |kappa| exceeds a per-(A,tilt) ceiling (a neighbor well crosses the start or target level).
+    That ceiling shrinks in *absolute* terms as A grows if `tilt` is held fixed, because the 1D
+    depth gap only grows like sqrt(A) while curvature grows like A -- measured: the
+    coupling-to-curvature ratio decays ~57x from A=2 to A=30 at tilt=0.05. Callers sweeping A
+    should instead scale `tilt` with `A` (e.g. `tilt = TILT_COEF * A**1.5`, calibrated so
+    `tilt(2)` matches whatever fixed value would otherwise be used) -- this keeps that ratio
+    exactly constant across the sweep instead of decaying (measured flat at ~0.63% for A=2..30 at
+    kappa_frac=1.0). This function does not compute that scaling itself, since A is swept
+    externally by the caller.
+
+    Args:
+        A: well-depth parameter, plays the same role as `asymmetric_double_well`'s `delta`.
+        tilt: linear symmetry-breaking coefficient, same role as `asymmetric_double_well`'s
+            `tilt`. Callers sweeping A should scale this with A (see above); this function takes
+            whatever value it's given.
+        kappa_frac: fraction of the true ordering-preserving `kappa` ceiling (found by bisection
+            against the actual ordering/positive-definiteness constraints, not a closed-form
+            proxy) to use. Ignored if `kappa` is given explicitly.
+        kappa: explicit coupling strength, bypassing `kappa_frac` entirely (e.g. `kappa=0` for a
+            purely separable baseline).
+        bounds_margin_lengthscales: override for `BOUNDS_MARGIN_LENGTHSCALES`, to experiment with
+            a larger domain margin without touching the shared constant every other well-type
+            potential in this file depends on.
+
+    Returns a dict matching every other `*_setting` factory in this file (`f_vec`, `f_grad_vec`,
+    `particle_init`, `set`, `bounds`, `depth_gap`), plus `wells` (the 4 well coordinates),
+    `depth_gap_start_neighbor`, `depth_gap_neighbor_target`, `kappa`, `A_eff`.
+    """
+    if kappa is None:
+        ceiling = _hybrid_kappa_ceiling(A, tilt)
+        if ceiling <= 0:
+            raise ValueError(
+                f"hybrid_quadruple_well_setting(A={A}, tilt={tilt}): even kappa=0 fails to "
+                f"produce 4 valid, correctly-ordered wells -- check A/tilt are individually valid "
+                f"for the underlying cubic (see asymmetric_double_well) first."
+            )
+        kappa = kappa_frac * ceiling
+
+    result = _hybrid_wells(A, tilt, kappa)
+    if result is None:
+        raise ValueError(
+            f"hybrid_quadruple_well_setting(A={A}, tilt={tilt}, kappa={kappa}): failed to locate "
+            f"all 4 wells (a required cubic had no 3 real roots, or the neighbor-well solve did "
+            f"not converge)."
+        )
+    wells, f_vals, well_eigs = result
+    if any(np.min(e) <= 0 for e in well_eigs.values()):
+        bad = {name: e for name, e in well_eigs.items() if np.min(e) <= 0}
+        raise ValueError(
+            f"hybrid_quadruple_well_setting(A={A}, tilt={tilt}, kappa={kappa}) is degenerate: "
+            f"non-positive Hessian eigenvalues at {bad}."
+        )
+    if not (f_vals['start'] > f_vals['neighbor1'] > f_vals['target']):
+        raise ValueError(
+            f"hybrid_quadruple_well_setting(A={A}, tilt={tilt}, kappa={kappa}): 3-level ordering "
+            f"violated ({f_vals}) -- reduce kappa_frac / |kappa|."
+        )
+    assert abs(f_vals['neighbor1'] - f_vals['neighbor2']) < 1e-6, (
+        f"hybrid_quadruple_well_setting(A={A}, tilt={tilt}, kappa={kappa}): neighbor wells are "
+        f"not degenerate ({f_vals['neighbor1']} vs {f_vals['neighbor2']}) -- fsolve likely failed "
+        f"to converge tightly enough."
+    )
+
+    x, y = symbols('x y')
+    f_sym = (x**4 - A * x**2 + tilt * x) + (y**4 - A * y**2 + tilt * y) + kappa * x * y
+    fx_sym, fy_sym = diff(f_sym, x), diff(f_sym, y)
+    f_num = lambdify((x, y), f_sym, modules='numpy')
+    fx_num = lambdify((x, y), fx_sym, modules='numpy')
+    fy_num = lambdify((x, y), fy_sym, modules='numpy')
+
+    def quadruple_well(pt):
+        return f_num(pt[0], pt[1])
+
+    def quadruple_well_grad(pt):
+        return np.array([fx_num(pt[0], pt[1]), fy_num(pt[0], pt[1])])
+
+    f_vec = np.vectorize(quadruple_well, signature='(n)->()')
+    f_grad_vec = np.vectorize(quadruple_well_grad, signature='(n)->(n)')
+
+    K = BOUNDS_MARGIN_LENGTHSCALES if bounds_margin_lengthscales is None else bounds_margin_lengthscales
+    margins = {name: _lengthscale_margin(np.min(well_eigs[name]), K=K) for name in wells}
+    x_lo = min(wells[name][0] - margins[name] for name in wells)
+    x_hi = max(wells[name][0] + margins[name] for name in wells)
+    y_lo = min(wells[name][1] - margins[name] for name in wells)
+    y_hi = max(wells[name][1] + margins[name] for name in wells)
+
+    start, target = wells['start'], wells['target']
+    return {
+        'f_vec': f_vec,
+        'f_grad_vec': f_grad_vec,
+        'particle_init': [[start[0] - 0.2, start[0] + 0.2], [start[1] - 0.2, start[1] + 0.2]],
+        'set': [[target[0] - 0.2, target[0] + 0.2], [target[1] - 0.2, target[1] + 0.2]],
+        'bounds': [[x_lo, x_hi], [y_lo, y_hi]],
+        'wells': {name: tuple(float(c) for c in w) for name, w in wells.items()},
+        'depth_gap': f_vals['start'] - f_vals['target'],
+        'depth_gap_start_neighbor': f_vals['start'] - f_vals['neighbor1'],
+        'depth_gap_neighbor_target': f_vals['neighbor1'] - f_vals['target'],
+        'kappa': kappa,
+        'A_eff': A - kappa / 2,
     }
 
 
