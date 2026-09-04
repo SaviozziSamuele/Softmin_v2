@@ -279,6 +279,8 @@ controlling it for a general, possibly time-dependent, inverse-temperature sched
     for every $x\in S$.
 \end{definition}
 
+\color{blue}
+
 \begin{theorem}[Descent of the ensemble minimum]
     \label{thm:ensemble-min}
     Let $f\in C^1(\R^d)$ have locally Lipschitz gradient, let $\beta_t>0$ be measurable, and let $\xx(t)=(x_1(t),\dots,x_n(t))$ be a global solution of
@@ -304,6 +306,8 @@ The estimate compares the best value in the ensemble against ordinary gradient f
     using $(1+v)e^{-v}\le1$ and $e^{-v}\le1$ for $v\ge0$. The pre-factor is thus bounded uniformly and decays exponentially in the particle's energy gap, so for coercive $f$ whose gradient grows at most polynomially in $f$ the drift stays bounded along trajectories and global solutions exist. We nonetheless state the theorem for a given global solution, since its conclusion concerns only the minimizing particles.
 \end{remark}
 
+\color{black}
+
 \section{Barrier Flattening and Exit Asymptotics}
 \label{sec:hitting-times}
 
@@ -314,8 +318,12 @@ This section fixes the inverse temperature in \eqref{e:sde}, $\beta_t\equiv\beta
 \end{equation}
 so $\prefactor{k}{\xx_t}$ acts as a state-dependent, sign-changing effective learning rate for particle $x_k$, as established in Section~\ref{sec:gradient-flow-dynamics}. The rigorous exit analysis below is carried out for physical dimension $d=1$; the extension to $d>1$ is discussed in Remark~\ref{rem:higher-dim}.
 
+\color{blue}
+
 \subsection{One-dimensional basin exit and post-saddle passage}
 \label{sec:exit-times}
+
+
 
 Fix $n\ge2$, $\beta>0$, and $d=1$. Consider three consecutive nondegenerate critical points of $f$,
 \[
@@ -453,6 +461,8 @@ Suppose in addition that $z_-$ admits a metastable domain $D_-\subset\R^n$ for t
 \end{corollary}
 We do not construct $D_-$ or verify these hypotheses here; Theorem~\ref{thm:transition-time} supplies only the quasipotential bound \eqref{eq:initial-bound}, which holds unconditionally.
 
+\color{black}
+
 \begin{remark}[Low-barrier regime: acceleration without sign reversal]
 \label{rem:low-barrier}
 By \eqref{eq:a1-equals-uprime}, $\prefactor{1}{\Gamma(x)}>0$ precisely when $r(x)<r_c$. Hence $u_h=u(h)$, i.e.\ $\min\{h,r_c\}=h$, exactly in the regime $h\le r_c$, and there the drift of the active particle is minimizing along the entire crossing: the sign-reversal mechanism is never activated, the crossing is made entirely against the drift, and by Theorem~\ref{thm:transition-time}(3) no Softmin-induced well appears at $s$. The acceleration is nonetheless strict, since $u(r)/r=ne^{-\beta r}/(n-1+e^{-\beta r})<1$ for $r>0$ gives $u(h)<h$. In this regime the gain comes purely from the Gibbs-weight damping of the leading particle's contribution to $nJ_\beta$, not from a sign reversal. By \eqref{eq:rc-location} the regime is $h\lesssim\beta^{-1}$; the sign-reversal mechanism is what handles barriers beyond that scale.
@@ -530,6 +540,8 @@ Figure~\ref{fig:experiments} (Left) reports 1D performance across barrier height
 
 Figure~\ref{fig:experiments} (Right) extends this to the 2D quadruple well, whose \texttt{particle\_init} and target sit at different depths, with a depth gap equal to $A$ exactly (Appendix~\ref{app:hyperparameter-methodology}, Table~\ref{tab:general_settings}). The same pattern holds and sharpens: Softmin reaches the target at every depth gap tested (2 through 30, 100\% of seeds throughout), while SA is faster where it still succeeds (e.g. $0.15$ mean entry time at $A=15$ against Softmin's $0.26$) but its reached-fraction falls to 17\% by $A=25$ and 0\% by $A=30$; Langevin fails already by $A=10$ (0\%, having succeeded at $A=5$). CBO and PSO reach the target in at most 3\% of seeds at every depth gap tested here; an independent, algorithm-agnostic stagnation check, logged per run (Appendix~\ref{app:hyperparameter-methodology}), confirms this is a genuine stall rather than an unreached timeout.
 
+\color{blue}
+
 \subsection{Lennard-Jones cluster benchmark}
 \label{sec:lj-benchmark}
 
@@ -545,6 +557,8 @@ Lennard-Jones clusters are our first benchmark for scaling with dimension: $N$ a
 \end{figure}
 
 Figure~\ref{fig:lj-experiments} reports the quenched-energy gap. Softmin's gap stays small and essentially flat across the full range tested (from $0$ at $N=13$ to $3.7$ at $N=75$), while every baseline's gap grows roughly linearly with $N$, from $1.8$--$5.6$ at $N=13$ to $23$--$30$ at $N=75$. Softmin's advantage over every baseline \emph{widens}, not narrows, as the cluster grows: the opposite of the ordinary curse-of-dimensionality intuition.
+
+\color{black}
 
 \subsection{High-dimensional Ackley benchmark}
 \label{sec:ackley-benchmark}
@@ -739,6 +753,8 @@ Here we will collect some of the more technical proofs of the lemmas stated in t
     Since $q'(r)=-\beta(n-1)-\beta e^{-\beta r}<0$ for all $r\in\R$, $q(0)=n>0$, and $q(r)\to-\infty$ as $r\to\infty$, $q$ has a unique zero $r_c>0$. From $q(1/\beta)=e^{-1}>0$ we get $r_c>1/\beta$; and $q(r_c)=0$ reads $(n-1)(\beta r_c-1)=e^{-\beta r_c}<1$, giving $\beta r_c<n/(n-1)$. This is \eqref{eq:rc-location}. As $ne^{-\beta r}/(n-1+e^{-\beta r})^2>0$, the sign of $u'$ is the sign of $q$, so $u$ is strictly increasing on $(-\infty,r_c]$ and strictly decreasing on $[r_c,\infty)$.
 \end{proof}
 
+\color{blue}
+
 \begin{proof}[Proof of Theorem~\ref{thm:transition-time}]
     \emph{Part 1.} For $r\le0$ we have $u(r)\le0$. For $r>0$, since $n-1+e^{-\beta r}>n-1$,
     \[
@@ -770,6 +786,8 @@ Here we will collect some of the more technical proofs of the lemmas stated in t
 
     If instead $h\le r_c$, then $r(x)\le h\le r_c$ for $x$ near $s$, with equality only at $x=s$, and the strict monotonicity of $u$ on $(-\infty,r_c]$ shows that $x\mapsto u(r(x))$ has a strict local maximum at $s$. Hence $\Gamma(s)$ is not a local minimum of $nJ_\beta$.
 \end{proof}
+
+\color{black}
 
 \section{Appendix: Experimental Details and Hyperparameters}
 \label{app:hyperparameters}

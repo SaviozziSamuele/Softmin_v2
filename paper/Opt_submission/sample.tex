@@ -1,0 +1,83 @@
+%\documentclass{opt2026} % Include author names
+\documentclass[anon]{opt2026} % Author names withheld
+
+% The following packages will be automatically loaded:
+% amsmath, amssymb, natbib, graphicx, url, algorithm2e
+
+\title[Specify Running Title]{Are DeepBigWideNets provably better than linear predictors?}
+
+% Use \Name{Author Name} to specify the name.
+% If the surname contains spaces, enclose the surname
+% in braces, e.g. \Name{John {Smith Jones}} similarly
+% if the name has a "von" part, e.g \Name{Jane {de Winter}}.
+% If the first letter in the forenames is a diacritic
+% enclose the diacritic in braces, e.g. \Name{{\'E}louise Smith}
+
+% Authors with the same address:
+\optauthor{%
+\Name{Sebastian U. Stich} \Email{stich@cispa.de}\\
+\Name{Author Name} \Email{xyz@sample.com}\\
+\addr CISPA, Germany}
+
+% Authors with different addresses:
+%\optauthor{%
+% \Name{Author Name1} \Email{abc@sample.com}\\
+% \addr Address 1
+% \AND
+% \Name{Author Name2} \Email{xyz@sample.com}\\
+% \addr Address 2%
+%}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}%
+Recently, a transformer network (DeepBigWideNets-1) has been shown to outperform linear predictors, in the sense that all its local minima are at least as good as the best linear predictor. We take a step towards extending this result to deep DeepBigWideNets-2. 
+\end{abstract}
+
+%\begin{keywords}%
+%  List of keywords%
+%\end{keywords}
+
+\section{Main}
+Main text limited to 6 pages, excluding references and appendices.
+
+\subsection{Citations (\texttt{natbib} package)}
+\citet{Samuel59} did preliminary studies in the field, their results were reproduced in~\cite[Theorem 1]{Samuel59}, see also~\cite{Samuel59} or \cite[see also][]{Samuel59}.
+
+\subsection{Algorithms (\texttt{algorithm2e} package)}
+For how to use this package, check out the \href{https://mirror.foobar.to/CTAN/macros/latex/contrib/algorithm2e/doc/algorithm2e.pdf}{doc}. You are free to choose another package, add line numbering, etc.
+
+\begin{algorithm2e}
+ \caption{Example Algorithm}
+ \SetAlgoLined
+  \KwData{this text}
+  \KwResult{how to write algorithm with \LaTeX2e }
+  initialization\;
+  \While{not at end of this document}{
+  read current\;
+  \eIf{understand}{
+  go to next section\;
+  current section becomes this one\;
+  }{
+  go back to the beginning of current section\;
+  }
+  } 
+\end{algorithm2e}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.3\textwidth]{example-image-a}
+\caption{This is a figure.}
+\end{figure}
+
+\bibliography{sample}
+%\newpage
+%\clearpage
+%\appendix
+
+%\section{More}
+%\input{appendix}
+
+\end{document}
