@@ -1210,3 +1210,126 @@ class PSO(Simulation):
         """Resets the environment, ensuring velocities are cleared."""
         super().reset(particle_init)
         self.velocities = np.zeros_like(self.particles)
+
+
+class _IndependentOptimizer(Simulation):
+    """Shared machinery for the deterministic, per-particle first-order baselines below.
+
+    Unlike every other method in this file, Adam and SGD have no interaction term and no noise:
+    the n particles are n INDEPENDENT optimizer chains that differ only in where they started.
+    That is deliberate. On the neural-network benchmark (run_transformer.py) the honest question
+    is whether Softmin's coupling beats the standard practice it would have to replace, run at
+    matched cost -- and since this ABC ensembles every method identically, "matched cost" means
+    Adam gets the same n restarts and the same per-step budget that Softmin's ensemble consumes.
+    Reported entry times and evaluation counts are therefore directly comparable.
+
+    Subclasses implement `_update(gradient)`, returning the per-particle position increment to be
+    SUBTRACTED from `self.particles`.
+    """
+
+    def step(self) -> None:
+        gradient = self._eval_grad(self.particles)
+        self.particles = self.particles - self._update(gradient)
+        self.particles = np.clip(self.particles, self._lower_bounds, self._upper_bounds)
+        self.values = self._eval_obj(self.particles)
+
+        improved = self.values < self.best_values
+        self.best_values[improved] = self.values[improved]
+        self.best_positions[improved] = self.particles[improved]
+
+        current_min_idx = np.argmin(self.values)
+        if self.values[current_min_idx] < self.best_global_value:
+            self.best_global_value = self.values[current_min_idx]
+            self.best_global_position = self.particles[current_min_idx].copy()
+
+    def _update(self, gradient: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+
+class SGD(_IndependentOptimizer):
+    """Vectorized stochastic gradient descent with optional heavy-ball momentum, run as n
+    independent chains. The simplest possible reference point for the neural-network benchmark.
+
+    Note `momentum=0.0` makes this mathematically identical to `GaussianDiffusion` with the noise
+    switched off; it is kept as its own class so the comparison table can name it, and so the
+    momentum variant (the one actually used in practice) is available.
+    """
+
+    def __init__(
+        self,
+        n: int,
+        d: int,
+        f: Callable[[np.ndarray], np.ndarray],
+        df: Callable[[np.ndarray], np.ndarray],
+        bounds: Optional[List[List[float]]] = None,
+        particle_init: Optional[List[List[float]]] = None,
+        learning_rate: float = 0.01,
+        momentum: float = 0.9,
+        name: str = "SGD",
+    ):
+        super().__init__(n=n, d=d, f=f, df=df, bounds=bounds, particle_init=particle_init,
+                         learning_rate=learning_rate, name=name)
+        self.momentum = momentum
+        self._lower_bounds = np.array([b[0] for b in self.bounds])
+        self._upper_bounds = np.array([b[1] for b in self.bounds])
+        self.buf = np.zeros_like(self.particles)
+
+    def _update(self, gradient: np.ndarray) -> np.ndarray:
+        self.buf = self.momentum * self.buf + gradient
+        return self.learning_rate * self.buf
+
+    def reset(self, particle_init: Optional[Union[List, np.ndarray]] = None) -> None:
+        """Resets the environment, clearing the momentum buffer."""
+        super().reset(particle_init)
+        self.buf = np.zeros_like(self.particles)
+
+
+class Adam(_IndependentOptimizer):
+    """Vectorized Adam (Kingma and Ba, 2015) run as n independent chains.
+
+    Standard bias-corrected formulation; the moment accumulators are per-particle and per-
+    coordinate, shape (n, d), so the n chains never interact. `self.n_steps` is not used as the
+    bias-correction counter because `reset()` zeroes it while the accumulators are also zeroed;
+    an explicit `self.t`, incremented in `_update`, keeps the correction aligned with the number
+    of updates actually applied.
+    """
+
+    def __init__(
+        self,
+        n: int,
+        d: int,
+        f: Callable[[np.ndarray], np.ndarray],
+        df: Callable[[np.ndarray], np.ndarray],
+        bounds: Optional[List[List[float]]] = None,
+        particle_init: Optional[List[List[float]]] = None,
+        learning_rate: float = 0.001,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        eps: float = 1e-8,
+        name: str = "Adam",
+    ):
+        super().__init__(n=n, d=d, f=f, df=df, bounds=bounds, particle_init=particle_init,
+                         learning_rate=learning_rate, name=name)
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self._lower_bounds = np.array([b[0] for b in self.bounds])
+        self._upper_bounds = np.array([b[1] for b in self.bounds])
+        self.m = np.zeros_like(self.particles)
+        self.v = np.zeros_like(self.particles)
+        self.t = 0
+
+    def _update(self, gradient: np.ndarray) -> np.ndarray:
+        self.t += 1
+        self.m = self.beta1 * self.m + (1.0 - self.beta1) * gradient
+        self.v = self.beta2 * self.v + (1.0 - self.beta2) * np.square(gradient)
+        m_hat = self.m / (1.0 - self.beta1 ** self.t)
+        v_hat = self.v / (1.0 - self.beta2 ** self.t)
+        return self.learning_rate * m_hat / (np.sqrt(v_hat) + self.eps)
+
+    def reset(self, particle_init: Optional[Union[List, np.ndarray]] = None) -> None:
+        """Resets the environment, clearing both moment accumulators and the step counter."""
+        super().reset(particle_init)
+        self.m = np.zeros_like(self.particles)
+        self.v = np.zeros_like(self.particles)
+        self.t = 0

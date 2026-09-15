@@ -13,3 +13,9 @@ tqdm==4.66.4
 # figures"). Unpinned on purpose -- pulls ipython/jupyter_client/traitlets/pyzmq/etc.
 # transitively; none of it affects numerical results, only notebook execution mechanics.
 ipykernel
+
+# Neural-network benchmark only (nn_objective.py / run_transformer.py). Deliberately UNPINNED and
+# placed below the pinned block above: it must not perturb the numpy/scipy versions the published
+# analytic-benchmark figures depend on. Install the CUDA build on the cluster
+# (see src/jobs/run_transformer.sh); the CPU wheel is enough to run the unit checks locally.
+torch

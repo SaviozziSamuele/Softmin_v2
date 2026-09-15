@@ -32,6 +32,12 @@ BASELINE_STYLE = {
     'pso':           ('PSO', '#D55E00', 'D'),
     'standard_cbo':  ('Standard CBO', '#CC79A7', 'P'),
     'standard_pso':  ('Standard PSO', '#999999', 'X'),
+    # Deterministic first-order references, used by the neural-network benchmark
+    # (run_transformer.py). Colors are outside the Okabe-Ito set above only because that set is
+    # exhausted by the eight swarm baselines; both are chosen to stay distinguishable from it and
+    # from each other in grayscale as well as color.
+    'adam':          ('Adam', '#882255', '*'),
+    'sgd':           ('SGD', '#44AA99', 'h'),
 }
 
 
@@ -244,12 +250,150 @@ def _asymmetric_errorbars(mean, q1, q3):
 # the two previously rendered identically once a point cleared min_reached_frac at all.
 RELIABLE_ANNOTATION_THRESHOLD = 0.9
 
-_DEFAULT_LEGEND_KWARGS = dict(fontsize=9, ncol=2, framealpha=0.9)
+# ---------------------------------------------------------------------------
+# Paper figure typography
+# ---------------------------------------------------------------------------
+# Figures are included at 0.48\textwidth (two panels per row, and Figure fig:experiments stacks
+# two such rows), so a 11x6in figure is reproduced roughly 3in wide on the page -- a ~3.7x linear
+# reduction. At matplotlib's 10pt defaults that puts tick labels near 3pt in print, well below
+# legibility. These sizes are chosen so the SMALLEST text survives that reduction at about 5-6pt.
+#
+# Call `use_paper_style()` once at the top of a plotting cell, before creating any figure.
+PAPER_RCPARAMS = {
+    'font.size': 15,
+    'axes.titlesize': 18,
+    'axes.labelsize': 17,
+    'xtick.labelsize': 14,
+    'ytick.labelsize': 14,
+    'legend.fontsize': 13,
+    'legend.title_fontsize': 13,
+    'figure.titlesize': 19,
+    # Thicker marks to match the larger type -- hairlines disappear under the same reduction.
+    'lines.linewidth': 2.0,
+    'lines.markersize': 7,
+    'axes.linewidth': 1.2,
+    'xtick.major.width': 1.2,
+    'ytick.major.width': 1.2,
+}
+
+
+def use_paper_style(scale=1.0):
+    """Apply `PAPER_RCPARAMS` to the global matplotlib state, optionally scaling every font size.
+
+    `scale` multiplies only the font sizes, not the line widths, so a figure that ends up at an
+    unusual width on the page can be nudged without restyling it: e.g. `use_paper_style(1.15)` for
+    a panel reproduced narrower than the 0.48\textwidth these defaults assume.
+    """
+    params = dict(PAPER_RCPARAMS)
+    if scale != 1.0:
+        for k in ('font.size', 'axes.titlesize', 'axes.labelsize', 'xtick.labelsize',
+                  'ytick.labelsize', 'legend.fontsize', 'legend.title_fontsize',
+                  'figure.titlesize'):
+            params[k] = params[k] * scale
+    plt.rcParams.update(params)
+    return params
+
+
+# ncol=2 keeps an 8-series legend from running the height of the axes now that it is set in 13pt.
+_DEFAULT_LEGEND_KWARGS = dict(fontsize=13, ncol=2, framealpha=0.9)
+
+
+def _load_point(results_dir, s, p):
+    """Load one (series, sweep-point) pair's per-seed values and reliability.
+
+    Shared by `plot_entry_time_comparison` and `plot_reached_fraction_comparison` so the speed
+    panel and the reliability panel of the same figure can never disagree about which seeds
+    counted as successes (2026-09: the two used to be computed in separate loops).
+
+    Returns `(times, reached_mask, reached_frac)`. When the series has no
+    `status_filename_template`, `reached_mask` is all-True and `reached_frac` is 1.0, matching the
+    pre-status behavior of treating every logged run as a genuine entry time.
+    """
+    filename = os.path.join(results_dir, s['filename_template'].format(p=p))
+    with open(filename, "rb") as f:
+        times = np.asarray(pkl.load(f))
+
+    status_template = s.get('status_filename_template')
+    if status_template is None:
+        return times, np.ones(times.shape, dtype=bool), 1.0
+
+    status_filename = os.path.join(results_dir, status_template.format(p=p))
+    with open(status_filename, "rb") as f:
+        statuses = np.asarray(pkl.load(f))
+    reached = statuses == 'target_reached'
+    reached_frac = float(np.mean(reached)) if reached.size else 0.0
+    return times, reached, reached_frac
+
+
+def plot_reached_fraction_comparison(x, results_dir, series, xlabel,
+                                      ylabel="Fraction of seeds reaching target",
+                                      title="", figsize=(7, 4.3), params=None, grid=True,
+                                      as_percent=False, legend_kwargs=None,
+                                      ax=None, show_legend=True):
+    """Plot reliability -- the fraction of seeds reaching the target -- vs. a swept parameter.
+
+    The companion panel to `plot_entry_time_comparison`. That function plots a mean conditional on
+    success and drops any point below `min_reached_frac`, so a method whose reliability collapses
+    renders as a curve that simply stops; this function plots *every* swept point, with no cutoff
+    and no survivorship masking, so the collapse is visible directly rather than by omission.
+
+    Takes the same `series` dicts as `plot_entry_time_comparison` (build them with
+    `baseline_series`), and requires `status_filename_template` on each: without per-seed statuses
+    there is no reliability to report, so such a series is skipped with a warning rather than
+    silently drawn at a flat 100%.
+
+    Args:
+        as_percent: plot 0-100 instead of 0-1 (y-label is not rewritten, pass your own `ylabel`).
+        grid: defaults True here (unlike the entry-time plot), since reading a fraction off a
+            linear axis benefits from gridlines.
+        x, results_dir, series, xlabel, ylabel, title, figsize, params, legend_kwargs: as in
+            `plot_entry_time_comparison`.
+
+    Returns:
+        (fig, ax)
+    """
+    # `ax` given: draw into the caller's grid (Figure 1 composes four panels into one figure
+    # with a single shared legend). `ax` omitted: own figure, as before.
+    owns_figure = ax is None
+    if owns_figure:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.get_figure()
+    x = np.asarray(x)
+    params = x if params is None else list(params)
+    scale = 100.0 if as_percent else 1.0
+
+    for s in series:
+        if s.get('status_filename_template') is None:
+            print(f"plot_reached_fraction_comparison: skipping series {s['label']!r} "
+                  f"(no status_filename_template, so no reliability data)")
+            continue
+
+        fracs = [_load_point(results_dir, s, p)[2] * scale for p in params]
+        ax.plot(x, fracs, label=s['label'], marker=s.get('marker', 'o'),
+                color=s.get('color'), linestyle='-')
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_ylim(-0.02 * scale, 1.02 * scale)
+    if grid:
+        ax.grid(alpha=0.3)
+    if show_legend:
+        ax.legend(**{**_DEFAULT_LEGEND_KWARGS, **(legend_kwargs or {})})
+    if owns_figure:
+        # Lay the axes out inside the canvas before returning. Without this, the larger
+        # paper-style type lets a long title or y-label overflow the figure and be clipped on
+        # save, even under bbox_inches='tight' (the Lennard-Jones panel's title did exactly
+        # that). Skipped when drawing into a caller's grid, which lays itself out.
+        fig.tight_layout()
+    return fig, ax
 
 
 def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean Entry Time",
-                                title="", yscale="log", grid=False, figsize=(11, 6), params=None,
-                                min_reached_frac=0.0, legend_kwargs=None):
+                                title="", yscale="log", grid=False, figsize=(7, 4.3), params=None,
+                                min_reached_frac=0.0, legend_kwargs=None,
+                                ax=None, show_legend=True):
     """Plot mean (+/- IQR) entry time vs. a swept parameter for several methods.
 
     Args:
@@ -278,7 +422,7 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
             reached-fraction label so partial reliability stays visible even once plotted (2026:
             survivorship-bias fix -- see the report that flagged points built from a handful of
             lucky seeds rendering identically to points built from a full successful cohort).
-        legend_kwargs: dict merged over `_DEFAULT_LEGEND_KWARGS` (fontsize=9, ncol=2,
+        legend_kwargs: dict merged over `_DEFAULT_LEGEND_KWARGS` (fontsize=13, ncol=2,
             framealpha=0.9) and passed to `ax.legend()` -- the previous bare `ax.legend()` produced
             an oversized single-column legend that crowded an 8-series plot's data.
         xlabel, ylabel, title, yscale, grid, figsize: standard matplotlib figure options.
@@ -286,7 +430,13 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
     Returns:
         (fig, ax)
     """
-    fig, ax = plt.subplots(figsize=figsize)
+    # `ax` given: draw into the caller's grid (Figure 1 composes four panels into one figure
+    # with a single shared legend). `ax` omitted: own figure, as before.
+    owns_figure = ax is None
+    if owns_figure:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.get_figure()
     x = np.asarray(x)
     params = x if params is None else list(params)
 
@@ -294,22 +444,14 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         means, q1s, q3s, keep, reached_fracs = [], [], [], [], []
         status_template = s.get('status_filename_template')
         for p in params:
-            filename = os.path.join(results_dir, s['filename_template'].format(p=p))
-            with open(filename, "rb") as f:
-                times = np.asarray(pkl.load(f))
-
-            if status_template is not None:
-                status_filename = os.path.join(results_dir, status_template.format(p=p))
-                with open(status_filename, "rb") as f:
-                    statuses = np.asarray(pkl.load(f))
-                reached = statuses == 'target_reached'
-                reached_frac = float(np.mean(reached)) if reached.size else 0.0
-                point_times = times[reached]
-                point_ok = reached_frac >= min_reached_frac and point_times.size > 0
-            else:
-                point_times = times
-                point_ok = True
-                reached_frac = 1.0
+            # Loading/masking is shared with plot_reached_fraction_comparison via _load_point, so
+            # the speed panel and the reliability panel of the same figure agree by construction
+            # about which seeds counted as successes. With no status pkl, _load_point returns an
+            # all-True mask and reached_frac=1.0, reproducing the old "every logged run counts"
+            # branch exactly (1.0 clears any min_reached_frac a caller can pass).
+            times, reached, reached_frac = _load_point(results_dir, s, p)
+            point_times = times[reached]
+            point_ok = reached_frac >= min_reached_frac and point_times.size > 0
 
             means.append(np.mean(point_times) if point_ok else np.nan)
             q1s.append(np.percentile(point_times, 25) if point_ok else np.nan)
@@ -334,7 +476,7 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
             for xi, yi, frac in zip(x[mask], means[mask], reached_fracs[mask]):
                 if frac < RELIABLE_ANNOTATION_THRESHOLD:
                     ax.annotate(f"{frac * 100:.0f}%", (xi, yi), textcoords="offset points",
-                                xytext=(0, -11), ha="center", fontsize=6.5, color="#666666")
+                                xytext=(0, -14), ha="center", fontsize=11, color="#666666")
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -343,12 +485,19 @@ def plot_entry_time_comparison(x, results_dir, series, xlabel, ylabel="Log Mean 
         ax.set_yscale(yscale)
     if grid:
         ax.grid()
-    ax.legend(**{**_DEFAULT_LEGEND_KWARGS, **(legend_kwargs or {})})
+    if show_legend:
+        ax.legend(**{**_DEFAULT_LEGEND_KWARGS, **(legend_kwargs or {})})
+    if owns_figure:
+        # Lay the axes out inside the canvas before returning. Without this, the larger
+        # paper-style type lets a long title or y-label overflow the figure and be clipped on
+        # save, even under bbox_inches='tight' (the Lennard-Jones panel's title did exactly
+        # that). Skipped when drawing into a caller's grid, which lays itself out.
+        fig.tight_layout()
     return fig, ax
 
 
 def plot_value_comparison(x, results_dir, series, xlabel, ylabel="Value", title="",
-                           yscale=None, grid=False, figsize=(11, 6), params=None,
+                           yscale=None, grid=False, figsize=(7, 4.3), params=None,
                            value_transform=None, legend_kwargs=None):
     """Plot mean (+/- IQR) of a value-space metric (e.g. quenched Lennard-Jones energy gap,
     re-evaluated RL return) vs. a swept parameter for several methods.
@@ -390,6 +539,10 @@ def plot_value_comparison(x, results_dir, series, xlabel, ylabel="Value", title=
     if grid:
         ax.grid()
     ax.legend(**{**_DEFAULT_LEGEND_KWARGS, **(legend_kwargs or {})})
+    # Lay the axes out inside the canvas before returning. Without this, the larger paper-style
+    # type lets a long title or y-label overflow the figure and be clipped on save, even under
+    # bbox_inches='tight' (the Lennard-Jones panel's title did exactly that).
+    fig.tight_layout()
     return fig, ax
 
 
