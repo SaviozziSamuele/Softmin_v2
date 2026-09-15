@@ -30,16 +30,7 @@ conda activate ./venv
 # to the gpu partition if torch can actually see the A40.
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print('GPU:', torch.cuda.get_device_name(0))"
 
-# CANARY. The whole budget rests on an ASSUMED GPU speedup over the CPU numbers measured in
-# probe_depth_feasibility.py (23,000 CPU-hours at the pre-cut budget; the cut configuration is
-# ~1/16 of that, so ~29 GPU-hours only if the GPU is ~50x the probe machine). Measure it before
-# committing two days of wall-clock: this prints the real per-step cost at the deepest point, and
-# the projection that follows from it.
-python probe_depth_feasibility.py
-
-# Recalibrate at the mid-sweep depth before the sweep itself. The shipped LR/beta/sigma were
-# selected on a 1-layer model and have no claim to transfer to a 50-layer one; stage D of this
-# script re-checks the selection at depth 50 and says outright whether it diverges or stalls.
-python calibrate_transformer.py
-
+# Stage 2 of 2. Submit only after jobs/calibrate_gpu.sh has run and its results have been
+# reviewed: LR and NOISE_SIGMA in run_transformer.py are constants, not read from the
+# calibration output, so they must be updated by hand first if calibration moved them.
 python run_transformer.py
