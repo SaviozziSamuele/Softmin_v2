@@ -33,4 +33,7 @@ python -c "import torch; assert torch.cuda.is_available(), 'CUDA not available';
 # Stage 2 of 2. Submit only after jobs/calibrate_gpu.sh has run and its results have been
 # reviewed: LR and NOISE_SIGMA in run_transformer.py are constants, not read from the
 # calibration output, so they must be updated by hand first if calibration moved them.
-python run_transformer.py
+# Arguments pass through, so the same script runs the whole sweep or a single shard, e.g.
+#   sbatch jobs/run_transformer.sh --tasks 50:0 50:1 50:2 --tag a
+# (jobs/submit_transformer_split.sh submits a balanced set of shards).
+python run_transformer.py "$@"

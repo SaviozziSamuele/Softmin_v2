@@ -19,9 +19,20 @@ already inside each task -- the n particles are batched into one vmap'd GPU call
 run SERIALLY in one process, reusing get_completed_tasks for the same crash-resumability and the
 same flush-and-fsync-per-row CSV append.
 
-Run:  cd src && python run_transformer.py     (or: sbatch jobs/run_transformer.sh)
+Splitting across GPUs. Tasks are (depth, seed) pairs. Any subset can be selected with --tasks
+(`50:3` is one task, a bare `10` is every seed of that depth), and each invocation writes its own
+CSV named by --tag, so several single-GPU jobs run the sweep in parallel without sharing a file.
+Cost is roughly linear in depth, so depth 50 alone is over half the sweep: balancing has to split
+depth 50 by seed, not just split the sweep by depth (jobs/submit_transformer_split.sh). --merge
+then combines the shard CSVs into RESULTS_CSV, deduplicating on (depth, seed).
+
+Run:  cd src && python run_transformer.py                     (whole sweep, one process)
+      python run_transformer.py --tasks 50:0 50:1 20 --tag a   (one shard)
+      python run_transformer.py --merge                        (combine shards)
 """
+import argparse
 import csv
+import glob
 import logging
 import os
 import time
@@ -42,6 +53,8 @@ from simulations import (
 logger = logging.getLogger(__name__)
 
 RESULTS_CSV = 'results/master_transformer.csv'
+# Per-shard CSVs, one per --tag; --merge combines them into RESULTS_CSV.
+SHARD_CSV = 'results/master_transformer_shard_{tag}.csv'
 
 # Depth is the difficulty axis. d_model and n_heads are fixed in nn_objective.transformer_setting,
 # so depth is the only thing that varies across the sweep.
@@ -113,12 +126,12 @@ SOFTMIN_BETA = 10.0
 #
 # The sweep's own optimum is sigma=0 (loss 0.0067 vs 0.0126 at 1e-5 -- both far below the 0.10
 # target). We deliberately do NOT use 0: it would reduce SimulatedAnnealing and GaussianDiffusion
-# to the SAME deterministic gradient descent and zero out CBO's diffusion, collapsing four of the
-# eight baselines into duplicates of each other and destroying the comparison this benchmark
-# exists to make. 1e-5 is the smallest value that keeps every method's dynamics distinct, at a
-# performance difference well inside the target margin.
+# to the SAME deterministic gradient descent, collapsing two of the five baselines into duplicates
+# of each other and destroying the comparison this benchmark exists to make. 1e-5 is the smallest
+# value that keeps every method's dynamics distinct, at a performance difference well inside the
+# target margin.
 #
-# Applies to Softmin, SA, Langevin and CBO alike, so no method is advantaged by the choice.
+# Applies to Softmin, SA and Langevin alike, so no method is advantaged by the choice.
 NOISE_SIGMA = 1e-5
 
 SA_COOLING_RATE = 0.9999
@@ -275,13 +288,78 @@ def run_serial(results_csv, header, all_tasks):
     logger.info(f"All tasks for {results_csv} finished.")
 
 
+def parse_tasks(specs):
+    """`50:3` -> [(50, 3)]; a bare `10` -> every seed of depth 10. Order is preserved and
+    duplicates dropped, so the shard runs its tasks in the order they were listed."""
+    tasks = []
+    for spec in specs:
+        if ':' in spec:
+            depth, seed = (int(x) for x in spec.split(':', 1))
+            tasks.append((depth, seed))
+        else:
+            tasks.extend((int(spec), seed) for seed in range(N_SEEDS))
+    bad = [t for t in tasks if t[0] not in DEPTHS or not 0 <= t[1] < N_SEEDS]
+    if bad:
+        raise ValueError(f"not part of the configured sweep (DEPTHS={DEPTHS}, "
+                         f"N_SEEDS={N_SEEDS}): {bad}")
+    return list(dict.fromkeys(tasks))
+
+
+def merge_shards(out_csv=RESULTS_CSV, pattern=SHARD_CSV.format(tag='*')):
+    """Combine shard CSVs into one, keeping the first row seen per (depth, seed), and refusing to
+    merge a shard whose header differs from HEADER (i.e. one run under a different configuration)."""
+    rows = {}
+    for path in sorted(glob.glob(pattern)):
+        with open(path, newline='') as fh:
+            reader = csv.reader(fh)
+            if next(reader, None) != HEADER:
+                raise ValueError(f"{path}: header does not match this driver's HEADER; "
+                                 f"refusing to merge a shard from a different configuration")
+            for row in reader:
+                if row:
+                    rows.setdefault(row_key(row), row)
+    expected = {(d, s) for d in DEPTHS for s in range(N_SEEDS)}
+    missing = sorted(expected - set(rows))
+    with open(out_csv, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(HEADER)
+        for key in sorted(rows):
+            writer.writerow(rows[key])
+    logger.info(f"Merged {len(rows)} rows into {out_csv}; {len(missing)} of {len(expected)} "
+                f"tasks missing" + (f": {missing}" if missing else ""))
+    return missing
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--tasks', nargs='+', default=None,
+                        help='DEPTH:SEED or DEPTH (all seeds); default is the whole sweep')
+    parser.add_argument('--tag', default=None,
+                        help='write to a shard CSV with this tag instead of RESULTS_CSV')
+    parser.add_argument('--merge', action='store_true',
+                        help='combine all shard CSVs into RESULTS_CSV and exit')
+    args = parser.parse_args(argv)
+
+    os.makedirs('results', exist_ok=True)
+    if args.merge:
+        merge_shards()
+        return
+
+    if args.tasks is None:
+        all_tasks = [(depth, seed) for depth in DEPTHS for seed in range(N_SEEDS)]
+    else:
+        try:
+            all_tasks = parse_tasks(args.tasks)
+        except ValueError as exc:
+            parser.error(str(exc))
+    results_csv = SHARD_CSV.format(tag=args.tag) if args.tag else RESULTS_CSV
+    run_serial(results_csv, HEADER, all_tasks)
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(message)s')
     # One thread per process: the GPU (or the vmap'd batch) is the parallelism here, and letting
     # torch spawn a thread per core on a 256-core node only causes contention.
     torch.set_num_threads(1)
-    os.makedirs('results', exist_ok=True)
-
-    all_tasks = [(depth, seed) for depth in DEPTHS for seed in range(N_SEEDS)]
-    run_serial(RESULTS_CSV, HEADER, all_tasks)
+    main()
