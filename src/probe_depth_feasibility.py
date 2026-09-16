@@ -37,6 +37,7 @@ OUT_PATH = 'results/depth_feasibility.txt'
 # rather than a proxy for it.
 DEPTHS = list(SWEEP_DEPTHS)
 PROBE_N = 2          # tiny ensemble: this measures scaling, not performance
+GRAD_REPS = 5        # timed gradient calls per depth, after one discarded warm-up call
 ADAM_STEPS = 60      # enough to see whether the loss moves off chance at all
 ADAM_LR = 1e-3
 
@@ -51,6 +52,11 @@ def main():
 
     emit(f"depth feasibility probe | probe n={PROBE_N}, planned n={N_PARTICLES}, "
          f"planned MAX_STEPS={MAX_STEPS}")
+    # Stated up front because getting this wrong silently invalidates every timing below: an
+    # earlier run of this probe inside a GPU job reported CPU step times, because
+    # transformer_setting used to default to CPU and this script did not pass a device.
+    emit(f"torch.cuda.is_available() = {torch.cuda.is_available()} | "
+         f"running on: {transformer_setting(depth=DEPTHS[0])['device']}")
     emit()
     emit(f"{'depth':>6} {'d (params)':>12} {'s/step':>9} {'grad norm':>10} "
          f"{'np mem':>9} {'act mem':>9} {'Adam loss':>10}   (memory at n={N_PARTICLES})")
@@ -64,10 +70,18 @@ def main():
         fg = _clipped(setting['f_grad_vec'])
 
         # Gradient scale, and time per gradient evaluation.
-        t0 = time.perf_counter()
+        #
+        # The FIRST call is discarded rather than timed. On GPU it pays for CUDA context creation,
+        # kernel autotuning and cuBLAS workspace allocation, which are one-off costs for the job
+        # and not part of a step; timing it made a 2-layer model look like 5.8 s/step on an A40.
+        # f_grad_vec returns a NumPy array, so each call already synchronizes the device and no
+        # explicit torch.cuda.synchronize() is needed for the timing to be honest.
         g = fg(x0)
-        t_grad = time.perf_counter() - t0
         gnorm = float(np.linalg.norm(g, axis=1).mean())
+        t0 = time.perf_counter()
+        for _ in range(GRAD_REPS):
+            fg(x0)
+        t_grad = (time.perf_counter() - t0) / GRAD_REPS
 
         # A Softmin/Adam step costs one f and one grad-f per particle, so ~2 passes; the gradient
         # pass dominates (forward + backward vs forward only), so ~1.5x the grad time is a fair

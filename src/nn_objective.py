@@ -119,8 +119,17 @@ def transformer_setting(
 
     `set` is None: there is no meaningful coordinate-space target box in weight space, so entry
     time is measured against the loss value, exactly as for Lennard-Jones.
+
+    `device` defaults to CUDA when it is available, and only falls back to CPU when it is not.
+    This used to default to CPU unconditionally, which was a silent trap: a caller that forgot to
+    pass `device` ran the whole benchmark on one CPU thread even inside a job holding an A40, and
+    nothing in the output said so -- the job's own `torch.cuda.is_available()` assertion passed
+    while every forward and backward pass ran on the CPU. It cost a GPU allocation before it was
+    noticed (the tell was a 50-layer step time on an A40 matching a laptop's). Pass `device`
+    explicitly to override; the returned dict reports the choice under `device`.
     """
-    device = torch.device(device) if device is not None else torch.device('cpu')
+    device = (torch.device(device) if device is not None
+              else torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     seq_len = 3
     vocab = p + 1
 
@@ -198,4 +207,6 @@ def transformer_setting(
         'depth': depth,
         'p': p,
         'n_train': int(X.shape[0]),
+        # Reported so a caller can print where it is actually running; see the device note above.
+        'device': str(device),
     }
