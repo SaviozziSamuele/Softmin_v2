@@ -19,9 +19,20 @@ already inside each task -- the n particles are batched into one vmap'd GPU call
 run SERIALLY in one process, reusing get_completed_tasks for the same crash-resumability and the
 same flush-and-fsync-per-row CSV append.
 
-Run:  cd src && python run_transformer.py     (or: sbatch jobs/run_transformer.sh)
+Splitting across GPUs. Tasks are (depth, seed) pairs. Any subset can be selected with --tasks
+(`50:3` is one task, a bare `10` is every seed of that depth), and each invocation writes its own
+CSV named by --tag, so several single-GPU jobs run the sweep in parallel without sharing a file.
+Cost is roughly linear in depth, so depth 50 alone is over half the sweep: balancing has to split
+depth 50 by seed, not just split the sweep by depth (jobs/submit_transformer_split.sh). --merge
+then combines the shard CSVs into RESULTS_CSV, deduplicating on (depth, seed).
+
+Run:  cd src && python run_transformer.py                     (whole sweep, one process)
+      python run_transformer.py --tasks 50:0 50:1 20 --tag a   (one shard)
+      python run_transformer.py --merge                        (combine shards)
 """
+import argparse
 import csv
+import glob
 import logging
 import os
 import time
@@ -42,6 +53,8 @@ from simulations import (
 logger = logging.getLogger(__name__)
 
 RESULTS_CSV = 'results/master_transformer.csv'
+# Per-shard CSVs, one per --tag; --merge combines them into RESULTS_CSV.
+SHARD_CSV = 'results/master_transformer_shard_{tag}.csv'
 
 # Depth is the difficulty axis. d_model and n_heads are fixed in nn_objective.transformer_setting,
 # so depth is the only thing that varies across the sweep.
@@ -80,13 +93,23 @@ CHECKPOINTS = [50, 100, 250, 500, 1000, MAX_STEPS - 1]
 
 # Gradient-norm clip, following run_lennard_jones.py's precedent and applied identically to every
 # method: Adagrad-style accumulation plus injected noise on a transformer loss diverges without it.
-MAX_GRAD_NORM = 1.0
+#
+# 1.0 -> 10.0 after recalibrating at the mid-sweep depth 10 (calibrate_transformer.py, stage B).
+# The first pass, run on a 1-layer model, concluded the clip never binds; that does not hold once
+# the model is deeper. At depth 10 the per-particle gradient norm is 0.9311 on average but ranges
+# up to 1.0341, so a clip of 1.0 does bite, and it costs a great deal: at eta=0.1 and 400 steps,
+# clip=1.0 reaches 1.1648 while clip=10.0 reaches 0.0754. 10.0 and no clip at all give identical
+# losses to four decimals, i.e. 10.0 is loose enough never to bind at these depths while still
+# bounding a pathological step.
+MAX_GRAD_NORM = 10.0
 
-# Learning rate, calibrated for this benchmark family (calibrate_transformer.py, stage B). The
-# eta=1e-3 used on the analytic benchmarks does not transfer: the raw gradient norm here is ~0.88
-# over d~5.7e4, so an eta=1e-3 step moves each coordinate by ~4e-6 against a weight scale of ~1e-1,
-# and the loss does not leave its initial value within any feasible budget (measured: 3.988 after
-# 400 steps, i.e. above the 3.970 chance level, at every clip value tested). eta=0.1 learns.
+# Learning rate, calibrated for this benchmark family (calibrate_transformer.py, stage B) and
+# confirmed at the mid-sweep depth 10. The eta=1e-3 used on the analytic benchmarks does not
+# transfer: at depth 10 the gradient norm is ~0.93 over d~5.1e5, so an eta=1e-3 step moves each
+# coordinate by ~1.4e-6 against a weight scale of ~1e-1, and the loss does not leave its initial
+# value within any feasible budget (measured: 3.9996 after 400 steps, i.e. above the 3.9703 chance
+# level, at every clip value tested). eta=0.1 learns, and stage D confirms it is still stable at
+# the deepest sweep point: 0.0104 after 400 steps at depth 50, neither diverging nor stalling.
 # Adam is exempt from this problem by construction, since it rescales per coordinate -- which is
 # exactly why it must not be the only method able to move.
 LR = 0.1
@@ -98,12 +121,12 @@ LR = 0.1
 # convention already applied to SA's T0 and PSO's coefficients. Adam and SGD use their
 # literature-standard defaults, which is the corresponding convention for them: lr=1e-3 is Adam's
 # canonical default, and SGD lr=1e-2 with momentum 0.9 is the standard baseline recipe.
-# beta stays at 10.0, the value used on every other benchmark. The calibration sweep
-# (calibrate_transformer.py, stage C1) is decisive about the ORDER of magnitude -- beta=0.1 and
-# beta=1.0 do not learn at all here (3.34 and 3.12, at/near chance), while beta=10 reaches 0.0168
-# and beta=100 reaches 0.0067 within 800 steps -- but 10 and 100 both clear the 0.10 target
-# comfortably, so 10 is kept for consistency with the rest of the paper rather than tuned to the
-# nominal per-benchmark optimum.
+# beta stays at 10.0, the value used on every other benchmark. Recalibrated at depth 10
+# (calibrate_transformer.py, stage C1): every candidate now clears the 0.10 target, and the top two
+# are indistinguishable -- beta=0.1 reaches 0.0157, beta=1 0.0042, beta=10 0.0028 and beta=100
+# 0.0024 within 800 steps. The nominal optimum is therefore 100, by a margin of 4e-4 over 10 on a
+# target of 0.10. 10 is kept for consistency with the rest of the paper rather than tuned to a
+# per-benchmark optimum that the measurement cannot meaningfully separate from it.
 SOFTMIN_BETA = 10.0
 
 # Noise level, calibrated for this benchmark family (calibrate_transformer.py, stage C2) rather
@@ -111,14 +134,16 @@ SOFTMIN_BETA = 10.0
 # perturbation of standard deviation sqrt(2*sigma*eta) that swamps weights of scale ~1e-1, and
 # destroys training outright rather than exploring (measured: 4.15, worse than chance).
 #
-# The sweep's own optimum is sigma=0 (loss 0.0067 vs 0.0126 at 1e-5 -- both far below the 0.10
-# target). We deliberately do NOT use 0: it would reduce SimulatedAnnealing and GaussianDiffusion
-# to the SAME deterministic gradient descent and zero out CBO's diffusion, collapsing four of the
-# eight baselines into duplicates of each other and destroying the comparison this benchmark
-# exists to make. 1e-5 is the smallest value that keeps every method's dynamics distinct, at a
-# performance difference well inside the target margin.
+# The sweep's own optimum is sigma=0, at depth 10 as at depth 1 (loss 0.0024 against 0.0065 at
+# 1e-5 -- both far below the 0.10 target, and both an order of magnitude better than 1e-4's
+# 0.0485). We deliberately do NOT use 0: it would reduce SimulatedAnnealing and GaussianDiffusion
+# to the SAME deterministic gradient descent, collapsing two of the five baselines into duplicates
+# of each other and destroying the comparison this benchmark exists to make. 1e-5 is the smallest
+# value that keeps every method's dynamics distinct, at a performance difference well inside the
+# target margin. Note the cliff just above it: 1e-3 and 1e-2 are at or worse than chance (3.95,
+# 4.08), so the usable range is narrow and 1e-5 sits safely inside it.
 #
-# Applies to Softmin, SA, Langevin and CBO alike, so no method is advantaged by the choice.
+# Applies to Softmin, SA and Langevin alike, so no method is advantaged by the choice.
 NOISE_SIGMA = 1e-5
 
 SA_COOLING_RATE = 0.9999
@@ -275,13 +300,78 @@ def run_serial(results_csv, header, all_tasks):
     logger.info(f"All tasks for {results_csv} finished.")
 
 
+def parse_tasks(specs):
+    """`50:3` -> [(50, 3)]; a bare `10` -> every seed of depth 10. Order is preserved and
+    duplicates dropped, so the shard runs its tasks in the order they were listed."""
+    tasks = []
+    for spec in specs:
+        if ':' in spec:
+            depth, seed = (int(x) for x in spec.split(':', 1))
+            tasks.append((depth, seed))
+        else:
+            tasks.extend((int(spec), seed) for seed in range(N_SEEDS))
+    bad = [t for t in tasks if t[0] not in DEPTHS or not 0 <= t[1] < N_SEEDS]
+    if bad:
+        raise ValueError(f"not part of the configured sweep (DEPTHS={DEPTHS}, "
+                         f"N_SEEDS={N_SEEDS}): {bad}")
+    return list(dict.fromkeys(tasks))
+
+
+def merge_shards(out_csv=RESULTS_CSV, pattern=SHARD_CSV.format(tag='*')):
+    """Combine shard CSVs into one, keeping the first row seen per (depth, seed), and refusing to
+    merge a shard whose header differs from HEADER (i.e. one run under a different configuration)."""
+    rows = {}
+    for path in sorted(glob.glob(pattern)):
+        with open(path, newline='') as fh:
+            reader = csv.reader(fh)
+            if next(reader, None) != HEADER:
+                raise ValueError(f"{path}: header does not match this driver's HEADER; "
+                                 f"refusing to merge a shard from a different configuration")
+            for row in reader:
+                if row:
+                    rows.setdefault(row_key(row), row)
+    expected = {(d, s) for d in DEPTHS for s in range(N_SEEDS)}
+    missing = sorted(expected - set(rows))
+    with open(out_csv, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(HEADER)
+        for key in sorted(rows):
+            writer.writerow(rows[key])
+    logger.info(f"Merged {len(rows)} rows into {out_csv}; {len(missing)} of {len(expected)} "
+                f"tasks missing" + (f": {missing}" if missing else ""))
+    return missing
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--tasks', nargs='+', default=None,
+                        help='DEPTH:SEED or DEPTH (all seeds); default is the whole sweep')
+    parser.add_argument('--tag', default=None,
+                        help='write to a shard CSV with this tag instead of RESULTS_CSV')
+    parser.add_argument('--merge', action='store_true',
+                        help='combine all shard CSVs into RESULTS_CSV and exit')
+    args = parser.parse_args(argv)
+
+    os.makedirs('results', exist_ok=True)
+    if args.merge:
+        merge_shards()
+        return
+
+    if args.tasks is None:
+        all_tasks = [(depth, seed) for depth in DEPTHS for seed in range(N_SEEDS)]
+    else:
+        try:
+            all_tasks = parse_tasks(args.tasks)
+        except ValueError as exc:
+            parser.error(str(exc))
+    results_csv = SHARD_CSV.format(tag=args.tag) if args.tag else RESULTS_CSV
+    run_serial(results_csv, HEADER, all_tasks)
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(message)s')
     # One thread per process: the GPU (or the vmap'd batch) is the parallelism here, and letting
     # torch spawn a thread per core on a 256-core node only causes contention.
     torch.set_num_threads(1)
-    os.makedirs('results', exist_ok=True)
-
-    all_tasks = [(depth, seed) for depth in DEPTHS for seed in range(N_SEEDS)]
-    run_serial(RESULTS_CSV, HEADER, all_tasks)
+    main()

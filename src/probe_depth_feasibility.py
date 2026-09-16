@@ -37,6 +37,7 @@ OUT_PATH = 'results/depth_feasibility.txt'
 # rather than a proxy for it.
 DEPTHS = list(SWEEP_DEPTHS)
 PROBE_N = 2          # tiny ensemble: this measures scaling, not performance
+GRAD_REPS = 5        # timed gradient calls per depth, after one discarded warm-up call
 ADAM_STEPS = 60      # enough to see whether the loss moves off chance at all
 ADAM_LR = 1e-3
 
@@ -51,6 +52,11 @@ def main():
 
     emit(f"depth feasibility probe | probe n={PROBE_N}, planned n={N_PARTICLES}, "
          f"planned MAX_STEPS={MAX_STEPS}")
+    # Stated up front because getting this wrong silently invalidates every timing below: an
+    # earlier run of this probe inside a GPU job reported CPU step times, because
+    # transformer_setting used to default to CPU and this script did not pass a device.
+    emit(f"torch.cuda.is_available() = {torch.cuda.is_available()} | "
+         f"running on: {transformer_setting(depth=DEPTHS[0])['device']}")
     emit()
     emit(f"{'depth':>6} {'d (params)':>12} {'s/step':>9} {'grad norm':>10} "
          f"{'np mem':>9} {'act mem':>9} {'Adam loss':>10}   (memory at n={N_PARTICLES})")
@@ -64,10 +70,18 @@ def main():
         fg = _clipped(setting['f_grad_vec'])
 
         # Gradient scale, and time per gradient evaluation.
-        t0 = time.perf_counter()
+        #
+        # The FIRST call is discarded rather than timed. On GPU it pays for CUDA context creation,
+        # kernel autotuning and cuBLAS workspace allocation, which are one-off costs for the job
+        # and not part of a step; timing it made a 2-layer model look like 5.8 s/step on an A40.
+        # f_grad_vec returns a NumPy array, so each call already synchronizes the device and no
+        # explicit torch.cuda.synchronize() is needed for the timing to be honest.
         g = fg(x0)
-        t_grad = time.perf_counter() - t0
         gnorm = float(np.linalg.norm(g, axis=1).mean())
+        t0 = time.perf_counter()
+        for _ in range(GRAD_REPS):
+            fg(x0)
+        t_grad = (time.perf_counter() - t0) / GRAD_REPS
 
         # A Softmin/Adam step costs one f and one grad-f per particle, so ~2 passes; the gradient
         # pass dominates (forward + backward vs forward only), so ~1.5x the grad time is a fair
@@ -95,28 +109,40 @@ def main():
 
         emit(f"{depth:>6} {d:>12,} {s_per_step:>9.2f} {gnorm:>10.4f} "
              f"{np_mem_gb:>8.1f}G {act_gb:>8.1f}G {adam_loss:>10.4f}")
-        rows.append((depth, d, s_per_step, adam_loss, setting['chance_loss']))
+        rows.append((depth, d, s_per_step, adam_loss, setting['chance_loss'], setting['device']))
 
     chance = rows[0][4]
     emit()
     emit(f"chance loss = {chance:.4f}. An Adam loss at or above it after {ADAM_STEPS} steps means "
          f"the model has not started learning;")
-    emit("that is only a 60-step probe, so it is a smoke signal, not proof of untrainability.")
+    emit(f"that is only a {ADAM_STEPS}-step probe, so it is a smoke signal, not proof of "
+         f"untrainability.")
     emit()
 
-    # Sweep cost, measured on THIS machine's CPU, plus a GPU-scaled estimate.
+    # Sweep cost at the measured per-step time. The device is named explicitly and the
+    # speedup extrapolation is printed ONLY when this ran on CPU: scaling a GPU measurement by an
+    # assumed "GPU speedup" would be double-counting, and an earlier version of this block did
+    # exactly that, reporting a GPU-measured total under a "(this CPU)" label.
+    device = str(rows[0][5])
+    on_cpu = not device.startswith('cuda')
     n_algos = len(ALGO_NAMES)
     emit(f"=== projected sweep cost ({n_algos} algorithms, {N_SEEDS} seeds, "
          f"MAX_STEPS={MAX_STEPS:,}) ===")
     total_cpu = 0.0
-    for depth, d, s_per_step, _, _ in rows:
+    for depth, d, s_per_step, _, _, _ in rows:
         per_run = s_per_step * MAX_STEPS
         cell = per_run * n_algos * N_SEEDS
         total_cpu += cell
         emit(f"  depth {depth:>2}: {s_per_step:.2f}s/step -> {per_run/3600:8.2f} h per run, "
              f"{cell/3600:9.1f} h for {n_algos} algos x {N_SEEDS} seeds")
-    emit(f"  TOTAL (this CPU): {total_cpu/3600:.0f} h = {total_cpu/86400:.1f} days")
-    for speedup in (20, 50):
+    emit(f"  TOTAL on {device}: {total_cpu/3600:.0f} h = {total_cpu/86400:.1f} days")
+    if not on_cpu:
+        # Sharded across GPUs by jobs/submit_transformer_split.sh. Cost is near-linear in depth,
+        # so depth 50 alone is over half the sweep and the split has to divide it by seed.
+        for k, frac in ((3, 30 / 87), (4, 25 / 87)):
+            emit(f"  sharded over {k} GPUs (jobs/submit_transformer_split.sh): "
+                 f"~{total_cpu/3600*frac:.0f} h wall-clock")
+    for speedup in (20, 50) if on_cpu else ():
         emit(f"  at {speedup}x GPU speedup: {total_cpu/3600/speedup:.1f} h "
              f"({total_cpu/86400/speedup:.2f} days)")
     emit()

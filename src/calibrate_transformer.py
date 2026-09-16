@@ -38,6 +38,7 @@ import os
 import time
 
 import numpy as np
+import torch
 
 logging.disable(logging.INFO)
 
@@ -105,6 +106,10 @@ def main():
     chance = setting['chance_loss']
     emit(f"transformer calibration | depth={DEPTH} d={setting['d']} n={N_PARTICLES} "
          f"n_train={setting['n_train']}")
+    # See probe_depth_feasibility.py's note: this script once ran entirely on CPU inside a GPU
+    # job, because transformer_setting defaulted to CPU and nothing here said otherwise.
+    emit(f"torch.cuda.is_available() = {torch.cuda.is_available()} | "
+         f"running on: {setting['device']}")
     emit(f"chance loss = log(p) = {chance:.4f} | target = {setting['target_loss']}")
     emit("A value at or above chance means the method has not learned anything at all.")
     emit()
