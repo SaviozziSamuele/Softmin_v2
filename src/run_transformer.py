@@ -93,13 +93,23 @@ CHECKPOINTS = [50, 100, 250, 500, 1000, MAX_STEPS - 1]
 
 # Gradient-norm clip, following run_lennard_jones.py's precedent and applied identically to every
 # method: Adagrad-style accumulation plus injected noise on a transformer loss diverges without it.
-MAX_GRAD_NORM = 1.0
+#
+# 1.0 -> 10.0 after recalibrating at the mid-sweep depth 10 (calibrate_transformer.py, stage B).
+# The first pass, run on a 1-layer model, concluded the clip never binds; that does not hold once
+# the model is deeper. At depth 10 the per-particle gradient norm is 0.9311 on average but ranges
+# up to 1.0341, so a clip of 1.0 does bite, and it costs a great deal: at eta=0.1 and 400 steps,
+# clip=1.0 reaches 1.1648 while clip=10.0 reaches 0.0754. 10.0 and no clip at all give identical
+# losses to four decimals, i.e. 10.0 is loose enough never to bind at these depths while still
+# bounding a pathological step.
+MAX_GRAD_NORM = 10.0
 
-# Learning rate, calibrated for this benchmark family (calibrate_transformer.py, stage B). The
-# eta=1e-3 used on the analytic benchmarks does not transfer: the raw gradient norm here is ~0.88
-# over d~5.7e4, so an eta=1e-3 step moves each coordinate by ~4e-6 against a weight scale of ~1e-1,
-# and the loss does not leave its initial value within any feasible budget (measured: 3.988 after
-# 400 steps, i.e. above the 3.970 chance level, at every clip value tested). eta=0.1 learns.
+# Learning rate, calibrated for this benchmark family (calibrate_transformer.py, stage B) and
+# confirmed at the mid-sweep depth 10. The eta=1e-3 used on the analytic benchmarks does not
+# transfer: at depth 10 the gradient norm is ~0.93 over d~5.1e5, so an eta=1e-3 step moves each
+# coordinate by ~1.4e-6 against a weight scale of ~1e-1, and the loss does not leave its initial
+# value within any feasible budget (measured: 3.9996 after 400 steps, i.e. above the 3.9703 chance
+# level, at every clip value tested). eta=0.1 learns, and stage D confirms it is still stable at
+# the deepest sweep point: 0.0104 after 400 steps at depth 50, neither diverging nor stalling.
 # Adam is exempt from this problem by construction, since it rescales per coordinate -- which is
 # exactly why it must not be the only method able to move.
 LR = 0.1
@@ -111,12 +121,12 @@ LR = 0.1
 # convention already applied to SA's T0 and PSO's coefficients. Adam and SGD use their
 # literature-standard defaults, which is the corresponding convention for them: lr=1e-3 is Adam's
 # canonical default, and SGD lr=1e-2 with momentum 0.9 is the standard baseline recipe.
-# beta stays at 10.0, the value used on every other benchmark. The calibration sweep
-# (calibrate_transformer.py, stage C1) is decisive about the ORDER of magnitude -- beta=0.1 and
-# beta=1.0 do not learn at all here (3.34 and 3.12, at/near chance), while beta=10 reaches 0.0168
-# and beta=100 reaches 0.0067 within 800 steps -- but 10 and 100 both clear the 0.10 target
-# comfortably, so 10 is kept for consistency with the rest of the paper rather than tuned to the
-# nominal per-benchmark optimum.
+# beta stays at 10.0, the value used on every other benchmark. Recalibrated at depth 10
+# (calibrate_transformer.py, stage C1): every candidate now clears the 0.10 target, and the top two
+# are indistinguishable -- beta=0.1 reaches 0.0157, beta=1 0.0042, beta=10 0.0028 and beta=100
+# 0.0024 within 800 steps. The nominal optimum is therefore 100, by a margin of 4e-4 over 10 on a
+# target of 0.10. 10 is kept for consistency with the rest of the paper rather than tuned to a
+# per-benchmark optimum that the measurement cannot meaningfully separate from it.
 SOFTMIN_BETA = 10.0
 
 # Noise level, calibrated for this benchmark family (calibrate_transformer.py, stage C2) rather
@@ -124,12 +134,14 @@ SOFTMIN_BETA = 10.0
 # perturbation of standard deviation sqrt(2*sigma*eta) that swamps weights of scale ~1e-1, and
 # destroys training outright rather than exploring (measured: 4.15, worse than chance).
 #
-# The sweep's own optimum is sigma=0 (loss 0.0067 vs 0.0126 at 1e-5 -- both far below the 0.10
-# target). We deliberately do NOT use 0: it would reduce SimulatedAnnealing and GaussianDiffusion
+# The sweep's own optimum is sigma=0, at depth 10 as at depth 1 (loss 0.0024 against 0.0065 at
+# 1e-5 -- both far below the 0.10 target, and both an order of magnitude better than 1e-4's
+# 0.0485). We deliberately do NOT use 0: it would reduce SimulatedAnnealing and GaussianDiffusion
 # to the SAME deterministic gradient descent, collapsing two of the five baselines into duplicates
 # of each other and destroying the comparison this benchmark exists to make. 1e-5 is the smallest
 # value that keeps every method's dynamics distinct, at a performance difference well inside the
-# target margin.
+# target margin. Note the cliff just above it: 1e-3 and 1e-2 are at or worse than chance (3.95,
+# 4.08), so the usable range is narrow and 1e-5 sits safely inside it.
 #
 # Applies to Softmin, SA and Langevin alike, so no method is advantaged by the choice.
 NOISE_SIGMA = 1e-5

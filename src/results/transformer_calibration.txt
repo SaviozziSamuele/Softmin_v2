@@ -1,48 +1,53 @@
-transformer calibration | depth=1 d=57216 n=4 n_train=2247
+transformer calibration | depth=10 d=507072 n=4 n_train=2247
+torch.cuda.is_available() = True | running on: cuda
 chance loss = log(p) = 3.9703 | target = 0.1
 A value at or above chance means the method has not learned anything at all.
 
 === A. Scale diagnostic at initialization ===
-  raw gradient norm      : mean 0.8827  (min 0.7494, max 1.0109)
-  clip=1.0   keeps 100.0% of the gradient; at eta=1e-3 the step norm is 8.83e-04 over d=57216
-  clip=10.0  keeps 100.0% of the gradient; at eta=1e-3 the step norm is 8.83e-04 over d=57216
-  per-coordinate step at eta=1e-3, clip=1.0: ~4.18e-06 -- compare typical weight scale ~1e-1
+  raw gradient norm      : mean 0.9311  (min 0.8559, max 1.0341)
+  clip=1.0   keeps 100.0% of the gradient; at eta=1e-3 the step norm is 9.31e-04 over d=507072
+  clip=10.0  keeps 100.0% of the gradient; at eta=1e-3 the step norm is 9.31e-04 over d=507072
+  per-coordinate step at eta=1e-3, clip=1.0: ~1.40e-06 -- compare typical weight scale ~1e-1
 
 === B. (eta, clip) grid, Softmin, beta=10, sigma=0, 400 steps ===
        eta   clip       loss  verdict                        secs
-     0.001    1.0     3.9876  no movement                      62
-     0.001   10.0     3.9876  no movement                      54
-     0.001   None     3.9876  no movement                      53
-      0.01    1.0     3.9689  learning                         52
-      0.01   10.0     3.9689  learning                         53
-      0.01   None     3.9689  learning                         51
-       0.1    1.0     3.2674  learning                         55
-       0.1   10.0     3.7581  learning                         54
-       0.1   None     3.7581  learning                         52
-  -> selected (eta, clip) = (0.1, 1.0) at loss 3.2674
+     0.001    1.0     3.9996  no movement                      87
+     0.001   10.0     3.9997  no movement                      87
+     0.001   None     3.9997  no movement                      90
+      0.01    1.0     3.9645  learning                         90
+      0.01   10.0     3.9645  learning                         90
+      0.01   None     3.9645  learning                         89
+       0.1    1.0     1.1648  learning                         88
+       0.1   10.0     0.0754  learning                         87
+       0.1   None     0.0754  learning                         90
+  -> selected (eta, clip) = (0.1, 10.0) at loss 0.0754
 
-=== C1. beta sweep at eta=0.1, clip=1.0, sigma=0, 800 steps ===
+=== C1. beta sweep at eta=0.1, clip=10.0, sigma=0, 800 steps ===
       beta       loss
-       0.1     3.3389
-       1.0     3.1156
-      10.0     0.0168
-     100.0     0.0067
-  -> selected beta = 100.0 at loss 0.0067
+       0.1     0.0157
+       1.0     0.0042
+      10.0     0.0028
+     100.0     0.0024
+  -> selected beta = 100.0 at loss 0.0024
 
-=== C2. sigma re-check at eta=0.1, clip=1.0, beta=100.0, 800 steps ===
+=== C2. sigma re-check at eta=0.1, clip=10.0, beta=100.0, 800 steps ===
      sigma  noise std/step       loss
-       0.0        0.000000     0.0067
-     1e-05        0.001414     0.0126
-    0.0001        0.004472     0.0361
-     0.001        0.014142     3.9746
-      0.01        0.044721     4.0592
-  -> selected sigma = 0.0 at loss 0.0067
+       0.0        0.000000     0.0024
+     1e-05        0.001414     0.0065
+    0.0001        0.004472     0.0485
+     0.001        0.014142     3.9537
+      0.01        0.044721     4.0800
+  -> selected sigma = 0.0 at loss 0.0024
 
-=== Reference: Adam (lr=1e-3, clip=1.0) at the same 800-step budget ===
-  loss 0.0021
+=== D. Selected config re-checked at depth 50, 400 steps ===
+  depth 50: d=2,506,432, chance=3.9703
+  Softmin at eta=0.1, beta=100.0, sigma=0.0: loss 0.0104 -> stable and learning
 
-SUMMARY -- set these in run_transformer.py:
+=== Reference: Adam (lr=1e-3, clip=10.0) at the same 800-step budget ===
+  loss 0.0010
+
+SUMMARY -- set these in run_transformer.py (and check stage D's verdict before trusting them at the deep end):
   LR = 0.1
-  MAX_GRAD_NORM = 1.0
+  MAX_GRAD_NORM = 10.0
   SOFTMIN_BETA = 100.0
   NOISE_SIGMA = 0.0
