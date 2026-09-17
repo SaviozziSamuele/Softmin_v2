@@ -1,22 +1,27 @@
-depth feasibility probe | probe n=2, planned n=20, planned MAX_STEPS=10000
+depth feasibility probe | probe n=2, planned n=10, planned MAX_STEPS=2000
+torch.cuda.is_available() = True | running on: cuda
 
- depth   d (params)    s/step  grad norm  np mem @n=20  act mem @n=20  Adam loss
-     5      257,152     27.12     0.8531          0.2G           1.0G     1.6359
-    10      507,072     16.40     0.9280          0.5G           2.1G     1.1583
-    20    1,006,912     39.86     0.7884          1.0G           4.1G     1.3863
-    50    2,506,432    124.30     0.9164          2.4G          10.4G     1.9927
+ depth   d (params)    s/step  grad norm    np mem   act mem  Adam loss   (memory at n=10)
+     2      107,200      0.13     0.6700      0.1G      0.2G     2.8081
+     5      257,152      0.29     0.8531      0.1G      0.5G     1.6304
+    10      507,072      0.54     0.9280      0.2G      1.0G     1.1582
+    20    1,006,912      1.10     0.7884      0.5G      2.1G     1.3864
+    50    2,506,432      3.03     0.9164      1.2G      5.2G     1.9557
 
 chance loss = 3.9703. An Adam loss at or above it after 60 steps means the model has not started learning;
 that is only a 60-step probe, so it is a smoke signal, not proof of untrainability.
 
-=== projected sweep cost (8 algorithms, 5 seeds, full MAX_STEPS) ===
-  depth  5: 27.12s/step ->     75.3 h per run,    3012.8 h for 8 algos x 5 seeds
-  depth 10: 16.40s/step ->     45.6 h per run,    1822.5 h for 8 algos x 5 seeds
-  depth 20: 39.86s/step ->    110.7 h per run,    4428.5 h for 8 algos x 5 seeds
-  depth 50: 124.30s/step ->    345.3 h per run,   13811.1 h for 8 algos x 5 seeds
-  TOTAL (this CPU): 23075 h = 961.5 days
-  at 20x GPU speedup: 1153.7 h (48.07 days)
-  at 50x GPU speedup: 461.5 h (19.23 days)
+=== projected sweep cost (5 algorithms, 5 seeds, MAX_STEPS=2,000) ===
+  depth  2: 0.13s/step ->     0.07 h per run,       1.8 h for 5 algos x 5 seeds
+  depth  5: 0.29s/step ->     0.16 h per run,       4.0 h for 5 algos x 5 seeds
+  depth 10: 0.54s/step ->     0.30 h per run,       7.5 h for 5 algos x 5 seeds
+  depth 20: 1.10s/step ->     0.61 h per run,      15.3 h for 5 algos x 5 seeds
+  depth 50: 3.03s/step ->     1.68 h per run,      42.1 h for 5 algos x 5 seeds
+  TOTAL (this CPU): 71 h = 2.9 days
+  at 20x GPU speedup: 3.5 h (0.15 days)
+  at 50x GPU speedup: 1.4 h (0.06 days)
 
-Compare the currently-planned depths {1,2,4,6}: 13 layer-units of total depth against
-85 for {5,10,20,50}, i.e. roughly 6.5x the compute for the same seed and algorithm counts.
+Total depth swept: 87 layer-units across 5 points.
+If the measured GPU per-step cost makes the total above exceed the job's --time limit,
+cut MAX_STEPS first (it has the most headroom), then N_PARTICLES; cut seeds last, since
+reliability across seeds is the headline metric this benchmark exists to measure.
