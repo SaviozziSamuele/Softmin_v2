@@ -1,11 +1,17 @@
 """Extra Softmin seeds on the transformer benchmark, to characterise a single outlier.
 
 The five-seed sweep (run_transformer.py) has one anomalous cell: at depth 50, seed 2, Softmin
-reaches the target at step 743 against 333-363 for the other four seeds. Its checkpoint series says
-this is a STALL, not a slow start -- at step 250 that seed held the LOWEST loss of the five (2.824
-against 3.07-3.46) and then plateaued, clearing the target only at 743. No other method is unusual
-at that seed (Adam 86, SGD 316, SA 1179, Langevin 469, all typical), so it is specific to Softmin's
-trajectory from that initialisation rather than a bad draw of the shared starting swarm.
+reaches the target at step 743 against 333-363 for the other four seeds. No other method is unusual
+at that seed (Adam 86, SGD 316, SA 1179, Langevin 469, all typical).
+
+OUTCOME (2026-09-17). All ten seeds shared with the sweep reproduced exactly (entry time and final
+loss), so the slow run is a property of the seed, not of GPU nondeterminism. It is not a one-off:
+5 of 25 seeds are slow at depth 50 (527-743, gap above 403) and 1 of 25 at depth 20 (551, gap above
+385); the two rates are not significantly different (Fisher exact p=0.19). A first reading of seed
+2 alone -- lowest loss of the five at step 250, then a plateau -- did NOT generalise: the slow seeds
+rank 5, 6, 19, 21, 24 of 25 by loss at step 250, so nothing that early predicts them, and the
+250-step checkpoint spacing cannot distinguish a plateau from slower descent. None fails (max 743 of
+2000 steps). Only Softmin was re-run, so whether other methods share the tail is unknown.
 
 One event in five seeds cannot distinguish a rare tail from a fluke, and a mean over five seeds is
 not robust to it (it lifts depth 50 from ~343 to 423 and is the only reason Softmin's entry time
