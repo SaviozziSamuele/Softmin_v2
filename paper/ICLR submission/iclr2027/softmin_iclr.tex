@@ -1,0 +1,1394 @@
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2027_conference,times}
+
+\usepackage[english]{babel}
+\usepackage{amsthm}
+\usepackage{amsmath}
+\usepackage{mathtools}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{xfrac}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\graphicspath{{../../}}
+
+\newcommand{\dd}{\mathrm d}
+\providecommand{\theHalgorithm}{\arabic{algorithm}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% THEOREMS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\prefactor}[2]{A_{#1}(#2)}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\newcommand{\xx}{\mathbf{x}}
+\newcommand{\XX}{\mathbf{X}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+
+\title{Global Optimization via Softmin\\ Energy Minimization}
+
+% Hidden in the submitted version as long as \iclrfinalcopy stays commented out.
+\author{Samuele Saviozzi \& Marco Romito \
+Department of Mathematics, University of Pisa, Pisa, Italy \
+\texttt{samuele.saviozzi@phd.unipi.it}, \texttt{marco.romito@unipi.it} \
+\And
+Andrea Agazzi \
+Institute of Mathematical Statistics and Actuarial Science, University of Bern, Bern, Switzerland \
+\texttt{andrea.agazzi@unibe.ch} \
+\And
+Vittorio Carlei \
+Department of Business Economics, University Gabriele d'Annunzio, Chieti, Italy \
+\texttt{carlei@unich.it}
+}
+
+%\iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+    Non-convex optimization in high dimensions requires balancing gradient information with global exploration, a tension that Langevin dynamics and other gradient-informed methods address only partially. We introduce a gradient-based swarm method driven by a Softmin energy interaction $J_\beta(\xx)$, a smooth approximation of the minimum over the ensemble that couples particles through their relative energies, and add Brownian noise to its gradient flow. We show that at every stable equilibrium the interaction splits the ensemble into particles at local minima and particles at local maxima; that without noise the ensemble's best value converges at least as fast as gradient flow under a Polyak--\L{}ojasiewicz condition; and that the interaction caps the Freidlin--Wentzell quasipotential barrier between adjacent basins at order $1/\beta$, independently of the true barrier height and strictly below the barrier an overdamped Langevin particle faces. Consistently with this cap, on double-well and quadruple-well benchmarks Softmin reaches the target in every run at every barrier height tested, while Simulated Annealing, Langevin dynamics, and variants of Particle Swarm Optimization and Consensus-Based Optimization all eventually fail; counting failed runs, it is more than an order of magnitude cheaper than Simulated Annealing overall, though not on low barriers. Nor is this a mere effect of ensemble size: Softmin succeeds in every run with five particles, whereas Simulated Annealing gains from more particles only what independent restarts predict, enough on moderate barriers but not on high ones. On Lennard-Jones clusters, Softmin's energy gap to the best known minimum stays nearly flat as the cluster grows while every baseline's rises, and the method trains transformers with millions of parameters. Its limits are equally clear: Particle Swarm Optimization is faster on a high-dimensional Ackley function, and Adam on transformer training, where no method struggled.
+\end{abstract}
+
+\section{Introduction}
+Non-convex objectives trap gradient-based methods in suboptimal local minima, a recognized bottleneck in settings from deep network training to reinforcement learning. The classical remedy is noise, as in Langevin dynamics \citep{CoffeyKalmykovWaldron2004} and noise-perturbed stochastic gradient descent \citep{fehrman2020convergence}; but the mean escape time of a noisy particle grows exponentially in the height of the surrounding barrier \citep{berglund2011kramers}. Simulated Annealing and its variants \citep{kirkpatrick1983optimization,gelfand1990sampling,tang2024discrete} shift from noisy exploration to local refinement through a cooling schedule. Running many particles helps, but independent particles gain only through statistical averaging. Letting them cooperate, as in Interacting Particle Langevin Dynamics \citep{akyildiz2025interacting,encinar2025proximal} or in metaheuristics such as Consensus-Based Optimization (CBO) and Particle Swarm Optimization (PSO) \citep{bandaru2016metaheuristic,yang2020nature}, can do better, but metaheuristics largely lack the guarantees available for gradient methods \citep{hussain2019metaheuristic,rajwar2023exhaustive}.
+
+We combine stochastic gradients with an interaction that has a precise, analyzable effect on barriers. Given $f:\R^d\to\R$ and an ensemble $\xx=(x_1,\dots,x_n)$, $x_i\in\R^d$, the Softmin energy
+\begin{equation}
+    J_\beta(\xx)=\sum_{i=1}^n\frac{\exp(-\beta f(x_i))}{\sum_{j=1}^n\exp(-\beta f(x_j))}f(x_i)
+    \label{eq:Softmin-energy}
+\end{equation}
+is the Gibbs-weighted average of the particles' values \citep{bertsekas1999nonlinear}, interpolating between their mean ($\beta\to0$) and their minimum ($\beta\to\infty$). We minimize it with the stochastic gradient flow on $\R^{nd}$
+\begin{equation}\label{e:sde}
+   \dd\xx_t = -n\nabla J_{\beta_t}(\xx_t)\dd t+\sqrt{2\sigma}\dd B_t,
+\end{equation}
+where $B_t$ is an $nd$-dimensional Brownian motion and $\sigma>0$ the noise intensity. The inverse temperature $\beta_t$ may vary in time for the descent guarantee of Theorem~\ref{thm:ensemble-min}; the barrier analysis of Section~\ref{sec:hitting-times} fixes it, and empirically a fixed, well-tuned $\beta$ outperformed annealing it (Appendix~\ref{apx:barrier-discussion}).
+
+\paragraph{Contributions.}
+\begin{itemize}
+    \item \textbf{Ensemble partitioning and no slowdown.} The gradient of $nJ_\beta$ rescales each particle's gradient by a state-dependent, sign-changing effective learning rate. At every stable equilibrium, particles with a positive rate sit at local minima and those with a negative rate at local maxima, and at least one particle is always at a local minimum (Theorem~\ref{thm:stationary-points}). The ensemble's best value never increases and, under a Polyak--\L{}ojasiewicz condition, converges at least as fast as gradient flow, for any temperature schedule (Theorem~\ref{thm:ensemble-min}).
+    \item \textbf{Barrier flattening.} The interaction caps the Freidlin--Wentzell quasipotential barrier between adjacent basins at order $1/\beta$, uniformly in the true barrier height and strictly below the exit exponent of an overdamped Langevin particle (Theorem~\ref{thm:transition-time}).
+    \item \textbf{Reliability beyond restarts, and its limits.} Softmin reaches the target in every run on double-well and quadruple-well landscapes at every barrier height tested, where every baseline eventually fails. With as few as five particles it keeps this reliability, while Simulated Annealing gains from more particles only what independent restarts predict. On Lennard-Jones clusters its gap to the best known minimum stays flat as the cluster grows, and it trains transformers with millions of parameters. PSO is faster on a high-dimensional Ackley function and Adam on transformer training. We present agreement with the theory as consistency, not confirmation (Section~\ref{sec:numerical-experiments}).
+\end{itemize}
+Proofs are in Appendix~\ref{apx:technical-proofs} and experimental settings in Appendix~\ref{app:hyperparameters}.
+
+\subsection{Related work}
+\label{sec:related}
+\textbf{Metaheuristics.} CBO \citep{CarrilloChoiTotzeckTse2018,pinnau2017consensus,fornasier2024consensus}, PSO \citep{kennedy1995particle}, and their gradient-informed variants \citep{carrillo2021consensus,noel2012new,riedl2023gradient,bolte2024swarm} coordinate particles through consensus averaging or attraction toward the best position found. Softmin instead uses the Softmin of the particles' values as the sole interaction, which assigns each particle a minimizing or maximizing role and yields a provable barrier cap.
+
+\textbf{Langevin and interacting-particle methods.} SGLD \citep{welling2011bayesian,raginsky2017nonconvex} analyzes a single diffusion driven by $\nabla f$. IPLD \citep{akyildiz2025interacting,encinar2025proximal} couples particles through their empirical measure to estimate marginal-likelihood gradients. Our coupling is competitive rather than mean-field: particles interact through their relative energies, with the aim of global optimization.
+
+\textbf{Gibbs ensembles and softmin.} Population Annealing \citep{Wang_2015} resamples a Gibbs-weighted population; the log-sum-exp free energy $F_\beta(\xx)=-\beta^{-1}\log\sum_ie^{-\beta f(x_i)}$ has gradient $w_k\nabla f(x_k)$, so it only slows trailing particles. The gradient of $J_\beta$ can instead reverse their motion, which is what destabilizes suboptimal minima. The Gibbs softmin has been studied as a smooth minimum \citep{bertsekas1999nonlinear} and in reinforcement learning \citep{mei2020global,song2019revisiting}, but to our knowledge not as an objective for global search. Appendix~\ref{apx:related} gives an extended discussion.
+
+\section{Gradient Flow dynamics for Softmin energy}
+\label{sec:gradient-flow-dynamics}
+
+We first study the deterministic flow
+\begin{equation}
+    \dd\xx_t = -n\nabla J_\beta(\xx_t)\dd t.
+    \label{eq:gradient-flow}
+\end{equation}
+Let $w_k = e^{-\beta f(x_k)}(\sum_j e^{-\beta f(x_j)})^{-1}$ be the Gibbs weight of particle $x_k$ and define the \emph{pre-factor} $\prefactor{k}{\xx} = nw_k\left[1 - \beta(f(x_k) - J_\beta(\xx))\right]$. Then (Lemma~\ref{lem:derivative-of-J-proof})
+\begin{equation}
+    \nabla_{x_k} (nJ_\beta(\xx)) =\prefactor{k}{\xx} \nabla f(x_k),
+    \label{eq:softmin-gradient}
+\end{equation}
+so \eqref{eq:gradient-flow} reads $\dot x_k=-\prefactor{k}{\xx}\nabla f(x_k)$: each particle follows its own gradient with a state-dependent \emph{effective learning rate}. As $\beta\to0$, $w_k\to1/n$ and $\prefactor{k}{\xx}\to1$, recovering $n$ independent gradient flows; this fixes the scaling factor $n$. The rate is positive, and the particle \emph{minimizing}, when $f(x_k) < J_\beta(\xx) + 1/\beta$. It is negative when $f(x_k) > J_\beta(\xx) + 1/\beta$, and the particle then performs gradient \emph{ascent}. A particle trapped in a poor minimum is therefore pushed uphill once the rest of the ensemble has found sufficiently lower values. Two facts drive the equilibrium analysis. First, since $\sum_k w_k=1$ and $\sum_k w_kf(x_k)=J_\beta(\xx)$,
+\begin{equation}
+    \sum_{k=1}^n \prefactor{k}{\xx} = n \qquad \text{for every } \xx\in\R^{nd},
+    \label{eq:sum-pre-factor}
+\end{equation}
+so some pre-factor is always positive. Second, when every particle sits at a critical point of $f$, the mixed second derivatives of $J_\beta$ vanish, and the Hessian of $nJ_\beta$ is block diagonal with blocks $\prefactor{k}{\xx}\nabla^2f(x_k)$ (Lemma~\ref{lem:derivative-of-J-proof}).
+
+\subsection{Stationary points of the dynamics}
+\label{sec:stationary-points}
+
+\begin{theorem}
+    \label{thm:stationary-points}
+    Let $f\in C^2(\R^d)$, let $\beta>0$, and let $\bar\xx=(\bar x_1,\dots,\bar x_n)$ be a locally asymptotically stable equilibrium of \eqref{eq:gradient-flow}. Then, for every $k\in\{1,\dots,n\}$, evaluated at $\bar\xx$:
+    \begin{enumerate}
+        \item $\nabla f(\bar x_k)=0$;
+        \item $\prefactor{k}{\bar\xx}\ne0$;
+        \item the sign of $\prefactor{k}{\bar\xx}$ fixes the type of $\bar x_k$:
+        \[
+            \begin{aligned}
+                \prefactor{k}{\bar\xx}>0 &\implies \bar x_k \text{ is a local minimum of } f,\\
+                \prefactor{k}{\bar\xx}<0 &\implies \bar x_k \text{ is a local maximum of } f,
+            \end{aligned}
+        \]
+        with $\prefactor{k}{\bar\xx}>0 \iff f(\bar x_k)<J_\beta(\bar\xx)+1/\beta$.
+    \end{enumerate}
+    Moreover, by \eqref{eq:sum-pre-factor}, at least one particle sits at a local minimum of $f$.
+\end{theorem}
+
+\noindent No convexity is assumed. In particular, no particle rests at a strict local minimum above the threshold $J_\beta(\bar\xx)+1/\beta$. Conversely:
+
+\begin{corollary}[Sufficient condition for stability]
+\label{cor:stability-sufficient}
+Let $\bar\xx=(\bar x_1,\dots,\bar x_n)$ satisfy $\nabla f(\bar x_k)=0$ for every $k$, and assume that for each $k$ either
+\[
+    \prefactor{k}{\bar\xx}>0 \text{ and } \nabla^2f(\bar x_k)\succ0,
+    \qquad\text{or}\qquad
+    \prefactor{k}{\bar\xx}<0 \text{ and } \nabla^2f(\bar x_k)\prec0,
+\]
+evaluated at $\bar\xx$. Then $\nabla^2(nJ_\beta)(\bar\xx)\succ0$; in particular $\bar\xx$ is a strict local minimum of $nJ_\beta$ and a locally asymptotically stable equilibrium of \eqref{eq:gradient-flow}.
+\end{corollary}
+
+\begin{proof}
+    By Lemma~\ref{lem:derivative-of-J-proof} the Hessian at a fully critical configuration is block diagonal with blocks $\prefactor{k}{\bar\xx}\nabla^2f(\bar x_k)$, and each hypothesis makes the corresponding block positive definite.
+\end{proof}
+
+The deterministic flow thus has stable equilibria that mix minima and maxima of $f$, not only consensus on one minimum, and which one is reached depends on the initialization. Escaping a suboptimal equilibrium requires noise, which Section~\ref{sec:hitting-times} analyzes.
+
+\subsection{Descent of the ensemble minimum}
+\label{sec:convergence-rate}
+
+The sign of $\prefactor{k}{\xx(t)}$ is not conserved along a trajectory, so we track the running best value $m(t):=\min_{k}f(x_k(t))$. We do this for an arbitrary, possibly time-dependent schedule $\beta_t>0$.
+
+\begin{definition}[Polyak--\L{}ojasiewicz condition]
+    \label{def:pl-condition}
+    A differentiable $f:\R^d\to\R$ satisfies the \textit{Polyak--\L{}ojasiewicz (PL) condition} on $S\subseteq\R^d$ with constant $\mu>0$ if $\tfrac12\|\nabla f(x)\|^2\ge\mu\bigl(f(x)-f_\star\bigr)$ for every $x\in S$, where $f_\star:=\inf f$.
+\end{definition}
+
+\begin{theorem}[Descent of the ensemble minimum]
+    \label{thm:ensemble-min}
+    Let $f\in C^1(\R^d)$ have locally Lipschitz gradient, let $\beta_t>0$ be measurable, and let $\xx(t)=(x_1(t),\dots,x_n(t))$ be a global solution of
+    \[
+        \dot x_k(t)=-\prefactor{k}{\xx(t)}\,\nabla f(x_k(t)), \qquad k=1,\dots,n.
+    \]
+    Suppose $f$ satisfies the Polyak--\L{}ojasiewicz condition (Definition~\ref{def:pl-condition}) with constant $\mu>0$ on the sublevel set $S_0:=\{x:f(x)\le m(0)\}$. Then $m$ is nonincreasing and
+    \[
+        m(t)-f_\star\le e^{-2\mu t}\bigl(m(0)-f_\star\bigr), \qquad t\ge0.
+    \]
+\end{theorem}
+
+This is a no-slowdown guarantee: the Softmin coupling never makes the ensemble's leading particle slower than ordinary gradient flow. It complements, rather than replaces, the basin-escape mechanism of Section~\ref{sec:hitting-times}. Without the PL hypothesis $m$ is still nonincreasing; only the exponential rate requires it. Global existence of solutions is discussed in Remark~\ref{rem:global-existence} (Appendix~\ref{apx:technical-proofs}).
+
+\section{Barrier Flattening and Exit Asymptotics}
+\label{sec:hitting-times}
+\label{sec:exit-times}
+
+We now fix $\beta_t\equiv\beta$ in \eqref{e:sde}, so that componentwise
+\begin{equation}
+    \dd x_k(t) = -\prefactor{k}{\xx_t}\nabla f(x_k(t))\dd t + \sqrt{2\sigma}\dd B_t^k,
+    \label{eq:softmin-langevin}
+\end{equation}
+and carry out the exit analysis in physical dimension $d=1$ (see the end of this section for $d>1$). Fix $n\ge2$ and three consecutive nondegenerate critical points $z_-<s<z_+$ of $f$: two local minima $z_\pm$ and the local maximum $s$ separating them, with
+\begin{equation}
+    f'(x)>0 \text{ on } (z_-,s), \qquad f'(x)<0 \text{ on } (s,z_+).
+    \label{eq:adjacent-well-monotonicity}
+\end{equation}
+Set the relative energy and barrier height
+\begin{equation}
+    r(x):=f(x)-f(z_-), \qquad h:=r(s)>0, \qquad \rho_+:=r(z_+)<h.
+    \label{eq:relative-energy}
+\end{equation}
+The case of interest is $\rho_+<0$, in which $z_+$ is the deeper minimum.
+
+\begin{assumption}
+\label{assum:channel}
+$f\in C^2(\R)$; $z_-<s<z_+$ are nondegenerate critical points of $f$ (i.e.\ $f''(z_-)>0$, $f''(s)<0$, $f''(z_+)>0$) satisfying the monotonicity condition \eqref{eq:adjacent-well-monotonicity}; and $n\ge2$, $\beta>0$, $d=1$.
+\end{assumption}
+
+The consensus $(z_-,\dots,z_-)$ is a strict local minimum of $nJ_\beta$, hence genuinely metastable (Remark~\ref{rem:metastable-init}, Appendix~\ref{apx:technical-proofs}). We use the Freidlin--Wentzell theory of exit times (Appendix~\ref{apx:fw-theory}): under its standard hypotheses, the exit time from a metastable domain $D$ satisfies $\lim_{\sigma\downarrow0}\sigma\log \E_{\xx}\tau_D^\sigma=V_\beta(\xx,\partial D)$, where $V_\beta$ is the quasipotential of \eqref{e:sde} at fixed $\beta$. To build an escape path, freeze $n-1$ particles at $z_-$ and let one move, $\Gamma(x):=(x,z_-,\dots,z_-)$. Factoring $e^{-\beta f(z_-)}$ out of the Gibbs weights gives the exact identity
+\begin{equation}
+    nJ_\beta(\Gamma(x))=nf(z_-)+u(r(x)), \qquad u(r):=\frac{n\,r\,e^{-\beta r}}{\,n-1+e^{-\beta r}\,}, \quad r\in\R,
+    \label{eq:reduced-potential}
+\end{equation}
+where $u$ is the \emph{reduced potential}.
+
+\begin{lemma}[Channel invariance and reduced gradient flow]
+\label{lem:channel-invariant}
+The set $\{\Gamma(x):x\in\R\}$ is invariant under \eqref{eq:gradient-flow}, since $f'(z_-)=0$ forces the frozen coordinates' drift to vanish identically. On this invariant manifold, the dynamics reduces to the one-dimensional gradient flow $\dot x=-W'(x)$ of the reduced potential $W(x):=u(r(x))$ of \eqref{eq:reduced-potential}.
+\end{lemma}
+
+\begin{lemma}[Channel drift and shape of the reduced potential]
+\label{lem:channel-drift}
+Let $\prefactor{1}{\Gamma(x)}$ denote the pre-factor of the active particle along the channel. Then, for every $x\in\R$,
+\begin{equation}
+    \prefactor{1}{\Gamma(x)}=u'(r(x))
+    =\frac{n\,e^{-\beta r(x)}\,q(r(x))}{\bigl(n-1+e^{-\beta r(x)}\bigr)^{2}},
+    \qquad
+    q(r):=(n-1)(1-\beta r)+e^{-\beta r}.
+    \label{eq:a1-equals-uprime}
+\end{equation}
+The function $q$ is strictly decreasing on $\R$ and has a unique zero $r_c$, which satisfies
+\begin{equation}
+    \frac1\beta<r_c<\frac{n}{(n-1)\beta}.
+    \label{eq:rc-location}
+\end{equation}
+Consequently $u$ is strictly increasing on $(-\infty,r_c]$ and strictly decreasing on $[r_c,\infty)$, and $r_c$ is exactly the relative-energy level at which the active particle switches from minimizing to maximizing, i.e.\ the level at which $f(x)-J_\beta(\Gamma(x))=1/\beta$.
+\end{lemma}
+
+We abbreviate the two relevant channel heights by
+\begin{equation}
+    u_c:=u(r_c)=\max_{r\in\R}u(r),
+    \qquad
+    u_h:=\max_{0\le r\le h}u(r)=u\bigl(\min\{h,r_c\}\bigr).
+    \label{eq:channel-heights}
+\end{equation}
+
+\begin{theorem}[One-dimensional basin exit and post-saddle passage]
+\label{thm:transition-time}
+Under Assumption~\ref{assum:channel}, the following hold.
+\begin{enumerate}
+    \item \textbf{(Uniform barrier cap.)}
+    \begin{equation}
+        u_c=\max_{r\in\R}u(r)<\frac{n}{e(n-1)\beta}.
+        \label{eq:barrier-cap}
+    \end{equation}
+    Both $u_c$ and, by \eqref{eq:rc-location}, $r_c$ are of order $\beta^{-1}$, uniformly in $h$.
+
+    \item \textbf{(Initial basin exit: quasipotential bound.)}
+    The infimum of the action among channel paths joining $\Gamma(z_-)$ to $\Gamma(s)$ equals $u_h$. Consequently
+    \begin{equation}
+        V_\beta\bigl(\Gamma(z_-),\Gamma(s)\bigr)\le u_h<\min\{h,r_c\}\le h.
+        \label{eq:initial-bound}
+    \end{equation}
+
+    \item \textbf{(Post-saddle well and passage.)}
+    Assume
+    \begin{equation}
+        r_c<h.
+        \label{eq:high-barrier-regime}
+    \end{equation}
+    Then $\Gamma(s)$ is a strict local minimum of $nJ_\beta$, with channel barrier $u_c-u(h)$ on the $z_-$ side. On the $z_+$ side:
+    \begin{itemize}
+        \item If $\rho_+<r_c$, there is a unique $\xi_+\in(s,z_+)$ with $r(\xi_+)=r_c$, the channel well at $\Gamma(s)$ has matching barrier height $u_c-u(h)$ on this side, and
+        \begin{equation}
+            V_\beta\bigl(\Gamma(s),\Gamma(\xi_+)\bigr)\le u_c-u(h)<u_c;
+            \label{eq:post-saddle-bound}
+        \end{equation}
+        \item If instead $\rho_+\ge r_c$, no point $\xi_+$ exists and the channel potential rises monotonically from $\Gamma(s)$ to $\Gamma(z_+)$, so no intermediate barrier separates them, with total rise $u(\rho_+)-u(h)\le u_c-u(h)$.
+    \end{itemize}
+    When $\rho_+<r_c$, concatenating the two crossings gives
+    \begin{equation}
+        V_\beta\bigl(\Gamma(z_-),\Gamma(\xi_+)\bigr) \;\le\; u_h+\bigl(u_c-u(h)\bigr) \;\le\; 2u_c-u(h) \;<\; \frac{2n}{e(n-1)\beta},
+        \label{eq:two-stage-bound}
+    \end{equation}
+    by \eqref{eq:initial-bound}, \eqref{eq:post-saddle-bound}, and $u_h\le u_c$. Under the standing hypothesis $r_c<h$ of this part one has $u_h=u_c$, so the second inequality in \eqref{eq:two-stage-bound} is in fact an equality.
+    If instead $h\le r_c$, $\Gamma(s)$ is not a local minimum of $nJ_\beta$ and no post-saddle well forms.
+\end{enumerate}
+\end{theorem}
+
+\begin{corollary}[Exit-time consequence, conditional]
+\label{cor:exit-time-conditional}
+Suppose in addition that $z_-$ admits a metastable domain $D_-\subset\R^n$ for the flow \eqref{eq:gradient-flow}, in the sense that $\Gamma(z_-)$ is the unique attractor of $D_-$ for the noiseless flow and the hypotheses of the Freidlin--Wentzell exit theorem (Appendix~\ref{apx:fw-theory}) hold on $D_-$, with $\Gamma(x_m)\in\partial D_-$ realizing the minimal quasipotential to $\partial D_-$, where $x_m\in(z_-,s]$ is the unique point with $r(x_m)=\min\{h,r_c\}$. Then
+\[
+    \lim_{\sigma\downarrow0}\sigma\log \E_{\Gamma(z_-)}\tau_{D_-}^\sigma
+    =V_\beta\bigl(\Gamma(z_-),\partial D_-\bigr)\le u_h<h.
+\]
+\end{corollary}
+We do not construct $D_-$ or verify these hypotheses; Theorem~\ref{thm:transition-time} supplies only the quasipotential bound \eqref{eq:initial-bound}, which holds unconditionally.
+
+\begin{remark}[Comparison with independent Langevin dynamics]
+\label{rem:comparison}
+For $n$ \emph{independent} overdamped Langevin particles started at $z_-$, the small-noise exit exponent is the physical barrier $h$: a minimum over $n$ i.i.d.\ exit times changes only the pre-factor, not the exponent. By \eqref{eq:initial-bound}, the joint Softmin diffusion admits a path of cost $u_h<h$ in every regime of $h$, and one capped at order $1/\beta$ however large $h$ is. This compares an \emph{upper bound} on the interacting system's quasipotential with the \emph{exact} exponent of the noninteracting one. A statement about exit \emph{times} holds only under the hypotheses of Corollary~\ref{cor:exit-time-conditional}.
+\end{remark}
+
+\begin{remark}[Low barriers]
+\label{rem:low-barrier}
+When $h\le r_c\approx\beta^{-1}$, the active particle's pre-factor stays positive along the whole crossing. The sign reversal is never activated and no post-saddle well forms, yet the reduction is still strict, $u(h)<h$, purely through the Gibbs-weight damping of the leading particle. The sign reversal is what handles barriers beyond the scale $\beta^{-1}$.
+\end{remark}
+
+\paragraph{Higher dimensions and temperature.} The channel identity extends algebraically to $d>1$: at a critical point $s$ the active Hessian block is $u'(h)\nabla^2 f(s)$, so at an index-one saddle with $u'(h)<0$ the induced well is a one-dimensional phenomenon. Transverse directions can only add escape routes, and since $V_\beta$ is an infimum over paths, the channel cost remains an upper bound on it. Part~3 does not carry over as stated: with $d-1$ stable transverse directions of $f$ at $s$, $\Gamma(s)$ is a minimum of $nJ_\beta$ along the channel only. The cap decreases like $\beta^{-1}$, but a large $\beta$ also suppresses the drift of non-leading particles through their Gibbs weights. Neither a decaying nor an increasing schedule $\beta_t$ improved on a fixed, well-chosen $\beta$ in our experiments. The scope of the theorem, the full comparisons and these negative results are discussed in Appendix~\ref{apx:barrier-discussion}.
+
+\section{Numerical Experiments}
+\label{sec:numerical-experiments}
+
+We run the Euler--Maruyama discretization of \eqref{e:sde} at a fixed $\beta$ (Algorithm~\ref{alg:softmin}, Appendix~\ref{app:hyperparameters}) against seven baselines: Simulated Annealing \citep{gelfand1990sampling}, overdamped Langevin dynamics \citep{welling2011bayesian}, CBO with gradient information with and without annealing \citep{carrillo2021consensus}, PSO with gradient information \citep{noel2012new}, and the canonical gradient-free CBO \citep{CarrilloChoiTotzeckTse2018, pinnau2017consensus} and PSO \citep{kennedy1995particle}. Each benchmark makes one thing hard at a time: the height of a barrier (Section~\ref{sec:double-quadruple-well}), the number of local minima as the dimension grows (Sections~\ref{sec:lj-benchmark} and~\ref{sec:transformer}), and the size of the ensemble (Section~\ref{sec:particle-sweep}). We always report \emph{reliability}, the fraction of independent runs that reach the target, alongside \emph{speed}, since a method that often fails can look fast on the few runs it solves. Conventions, detailed results and calibration are in Appendix~\ref{app:hyperparameters}, and the code is available \citep{softmin_energy_2026}. One caveat applies throughout: Theorem~\ref{thm:transition-time} is a vanishing-noise statement, while the analytic benchmarks run at a noise level at which the proven cap is negligible. Where the experiments agree with the theory we therefore claim consistency, not confirmation; the small-noise regime is tested in Appendix~\ref{apx:theory-verification}.
+
+\subsection{Double-well and quadruple-well benchmarks}
+\label{sec:double-quadruple-well}
+
+The one-dimensional double well and the two-dimensional quadruple well each have a shallow basin, where every run starts, and a deeper target basin, separated by a barrier whose height we control.
+
+\begin{figure*}[!htbp]
+  \centering
+  \includegraphics[width=\textwidth]{images/well_benchmarks.png}
+  \caption{Double well (left, against barrier height) and quadruple well (right, against the depth
+  gap between the two wells). Top: fraction of the 100 runs reaching the target. Bottom: expected
+  cost of a success in function and gradient evaluations, counting failed runs; a gap means no run
+  succeeded. Time to the target over successful runs is in Figure~\ref{fig:well-entry-time};
+  conventions in Appendix~\ref{apx:protocol}.}
+  \label{fig:experiments}
+\end{figure*}
+
+Softmin reaches the target in every run at every barrier height on both landscapes, across barriers spanning three orders of magnitude (Figure~\ref{fig:experiments}, top). Every baseline eventually fails: Simulated Annealing matches Softmin while the barrier is low and then collapses until no run succeeds, Langevin dynamics fails much earlier, and CBO and PSO almost never reach the target. This is the pattern Theorem~\ref{thm:transition-time} describes, where a capped effective barrier keeps a method escaping while methods governed by the true height fail once it is large. For the reason above we read it as consistency only, and an ablation (Appendix~\ref{apx:ablation-study}) points to the Gibbs weighting of the ensemble as the more plausible source of the advantage.
+
+Where Simulated Annealing still succeeds, it is faster than Softmin (Figure~\ref{fig:well-entry-time}). A practitioner cannot know in advance which runs will fail, however, so we also charge each method for its failed runs, as is standard in black-box benchmarking \citep{hansen2016coco}. The comparison then becomes a crossover (Figure~\ref{fig:experiments}, bottom). Simulated Annealing is cheaper on low barriers, but beyond a moderate barrier its cost grows without bound, because its cooling schedule freezes the dynamics after a fixed time whatever the barrier. Over the whole sweep Softmin is more than an order of magnitude cheaper (Appendix~\ref{apx:wells}).
+
+\subsection{Lennard-Jones cluster benchmark}
+\label{sec:lj-benchmark}
+
+Lennard-Jones clusters of $N$ atoms \citep{jones1924determination} are a standard, physically motivated test whose number of local minima grows exponentially with $N$. We use clusters of 13 to 75 atoms, up to 225 dimensions, with best known energies from the Cambridge Cluster Database \citep{wales1997global}. As is standard, each final configuration is relaxed to its nearest local minimum, and we score its energy gap to the best known minimum, since beyond the smallest cluster almost no method reaches a strict target. Softmin's gap stays small and nearly constant as the cluster grows, while every baseline's grows roughly in proportion to $N$ (Figure~\ref{fig:lj-experiments}), so its advantage widens with dimension instead of narrowing (Appendix~\ref{apx:lj}).
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.8\linewidth]{images/lj_energy_gap.png}
+  \caption{Lennard-Jones clusters of 13 to 75 atoms: energy gap between the best configuration each
+  method finds, after relaxation to its nearest local minimum, and the best known minimum.}
+  \label{fig:lj-experiments}
+\end{figure}
+
+\subsection{Scaling with ensemble size}
+\label{sec:particle-sweep}
+
+Every benchmark above uses 100 particles. Simulated Annealing with $n$ particles is $n$ independent runs, so a larger ensemble may help it through restarts alone. We therefore ask whether Softmin's coupling achieves something that restarts do not, by varying the ensemble from 5 to 400 particles on the quadruple well at three depth gaps.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{images/particle_sweep.png}
+  \caption{Softmin and Simulated Annealing on the quadruple well at an intermediate depth gap, with
+  5 to 400 particles. Left: fraction of runs reaching the target; the dashed line is what
+  independent restarts predict from the smallest ensemble alone. Center: time to the target over
+  successful runs. Right: expected cost of a success, counting failed runs. Other difficulties in
+  Appendix~\ref{apx:particle-sweep}.}
+  \label{fig:particle-sweep}
+\end{figure}
+
+Softmin reaches the target in every run at every ensemble size and difficulty, even with 5 particles. Simulated Annealing always succeeds at the smallest depth gap and is never rescued at the largest. At the intermediate one, its reliability grows exactly as independent restarts predict from the smallest ensemble (Figure~\ref{fig:particle-sweep}, left), so its gain from the ensemble is restarts and nothing more. Langevin dynamics sharpens the point: with one particle Softmin's pre-factor is identically one and its update is exactly Langevin's, which fails at all three depth gaps even with 100 independent particles (Figure~\ref{fig:experiments}). Five Softmin particles thus differ from five copies of a failing method only in their interaction. This matches Theorem~\ref{thm:transition-time}: restarts multiply a success probability without changing how fast it decays with the barrier, whereas a capped barrier should need them at neither difficulty.
+
+Counting failed runs, Softmin is cheapest with its smallest ensemble, while Simulated Annealing's cost falls as extra restarts buy reliability. At the smallest depth gap Simulated Annealing is cheaper at every size. At the intermediate one Softmin is far cheaper with small ensembles, but from 100 particles on the two cost about the same, so brute force can overcome this advantage (Section~\ref{sec:limitations}). At the largest, Simulated Annealing's cost is effectively unbounded. An unexplained non-monotonicity in Softmin's time to the target at the largest gap is analyzed in Appendix~\ref{apx:particle-sweep}.
+
+\subsection{High-dimensional problems: Ackley and a transformer}
+\label{sec:transformer}
+
+The generalized Ackley function places a dense lattice of shallow minima on one smooth funnel, and is our synthetic high-dimensional test (10 to 90 dimensions, Appendix~\ref{apx:ackley}). It is where Softmin does worst: PSO is the fastest method at every dimension by a wide margin, and Softmin fails in 10 and 20 dimensions. From 40 dimensions on it reaches the target in every run, and it is the only method outside the PSO family to become reliable. On a landscape whose difficulty lies in the number of minima rather than their depth, Softmin thus delivers reliability but not speed.
+
+As a real network, we train a small transformer on modular addition, a standard testbed for small transformers \citep{power2022grokking,nanda2023progress} also used to compare optimizers \citep{tveit2025muon}. Depth varies from 2 to 50 layers, or from about $10^5$ to $2.5\times10^6$ parameters. We add Adam \citep{kingma2014adam} and SGD with momentum to Simulated Annealing and Langevin dynamics. Every method uses 10 particles and must bring the training loss below $0.10$ (Appendix~\ref{apx:transformer}).
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.6\linewidth]{images/transformer_depth.png}
+  \caption{Transformer training at depths from 2 to 50 layers, five seeds per method and depth.
+  Steps needed to reach the target training loss, as the mean over seeds (line) and for each seed
+  (faint points); markers are offset horizontally so that they do not overlap.}
+  \label{fig:transformer}
+\end{figure}
+
+Every method reaches the target from every starting point at every depth, so this benchmark does not separate the methods on reliability, and depth did not make training harder. It measures speed at scale (Figure~\ref{fig:transformer}). Softmin's step count barely changes with depth. It needs about a quarter of Simulated Annealing's steps and fewer than Langevin dynamics at every depth, while SGD goes from twice as slow as Softmin to matching it at 50 layers, and Adam is three to four and a half times faster throughout. We read this as evidence that Softmin carries over to networks with millions of parameters, not of an advantage there: when every method reaches the target from every start, a mechanism for escaping poor basins has nothing to act on.
+
+\section{Conclusion}
+
+We introduced a swarm method driven by the Softmin energy and proved two guarantees for it. Without noise, the ensemble's best value converges at least as fast as gradient flow under a Polyak--\L{}ojasiewicz condition, for any temperature schedule. At fixed temperature, the interaction caps the quasipotential barrier between adjacent basins at order $1/\beta$, independently of the true barrier height. Empirically, Softmin's case is reliability. It is the only method that keeps reaching the target as barriers grow, with as few as five particles and at a fraction of Simulated Annealing's cost over the sweep, and its gap on Lennard-Jones clusters stays flat with dimension. It is not the fastest method on Ackley or on transformer training.
+
+\subsection{Limitations and future work}
+\label{sec:limitations}
+The barrier cap bounds a quasipotential through one explicit channel. It becomes a statement about exit times only under metastability hypotheses we do not verify, and the exact transition exponent remains open. The experiments run at a noise level where the cap is negligible, and an ablation finds that at $\beta=10$ the sign-reversal mechanism is not what carries the advantage, though it appears to dominate at $\beta=2$ as barriers grow (Appendix~\ref{apx:ablation-study}). The results therefore show the behavior the theory describes, not that its mechanism produces it. The advantage is also bounded: PSO is faster on Ackley, restarts recover Simulated Annealing's reliability at a moderate depth gap once $n\geq100$, and our network benchmark contains no reliability test, with Adam several times faster. Open directions are a mean-field analysis of the $n\to\infty$ limit, adaptive temperature schedules, and network-training problems on which runs do fail. Appendix~\ref{apx:limitations} discusses these points in full.
+
+
+\subsection*{AI use statement}
+In this work, we used generative AI tools to generate the dataset for the transformer experiments, to assist in the writing of proofs, and to check the validity of algebraic formulae, to implement methods other than Softmin. We did not use generative AI tools to develop theoretical models or conceptual frameworks, to provide critical ingredients for proving mathematical claims, to propose or refine hypotheses, to design or provide feedback on the research methodology or experiments, to assist with translation, to support qualitative or thematic data analysis, or to interpret results; cleaning or reformatting datasets is not applicable to this work. Additionally, we used generative AI tools to create and edit scientific figures and plotting code, and to draft and edit parts of the paper to improve readability and fit the page limit. We have reviewed all AI-assisted work: all authors checked every proof and derivation, the generated dataset was verified against the definition of modular addition, and the implemented methods where verifyed against literature. We take responsibility for the final content of this work, including text, claims or artifacts produced with the aid of generative AI.
+
+
+\subsection*{Reproducibility statement}
+All theoretical results are stated with their assumptions in Sections~\ref{sec:gradient-flow-dynamics}--\ref{sec:hitting-times}, with complete proofs in Appendix~\ref{apx:technical-proofs} and the large-deviation background in Appendix~\ref{apx:fw-theory}. The discretized algorithm is given exactly as run in Algorithm~\ref{alg:softmin}. Appendix~\ref{app:hyperparameters} lists every landscape, hyperparameter, initialization, step budget and seed count, together with the calibration procedure applied identically to Softmin and to every baseline. Anonymized source code for all experiments and figures is available \citep{softmin_energy_2026}.
+
+\bibliographystyle{iclr2027_conference}
+\bibliography{../../references}
+
+\newpage
+\appendix
+\section{Extended Related Work}
+\label{apx:related}
+
+\paragraph{Metaheuristic optimization methods}
+Metaheuristic optimization methods include Consensus-Based Optimization (CBO) \citep{CarrilloChoiTotzeckTse2018,fornasier2024consensus,pinnau2017consensus, carrillo2021consensus}, Genetic Algorithms \citep{Goldberg1989}, Ant Colony Optimization \citep{DorigoStutzle2004}, and Particle Swarm Optimization (PSO) \citep{kennedy1995particle, noel2012new}. Traditional particle-swarm approaches typically operate without explicit gradient information, relying instead on position-based updates to coordinate particles toward promising regions. When reliable gradient information is available, leveraging it enables convergence rates comparable to standard stochastic gradient descent, which gradient-agnostic metaheuristics cannot achieve.
+
+Recent gradient-based swarm methods \citep{riedl2023gradient, bolte2024swarm, carrillo2021consensus, noel2012new} have made progress by incorporating gradient information into multi-particle dynamics. However, our approach differs fundamentally in its mechanism for inducing exploration and escaping barriers. Rather than consensus-based averaging or general gradient-weighted potentials, we employ the Softmin energy functional to explicitly create a minimizing/maximizing partition of the particle ensemble: particles below the Softmin threshold are drawn toward local minima via gradient descent, while particles above the threshold are repelled toward maxima. This automatic role assignment (Theorem~\ref{thm:stationary-points}) simultaneously reduces effective potential barriers (Theorem~\ref{thm:transition-time}) and forces suboptimal particles into exploratory regimes without requiring manual basin-switching heuristics.
+
+To the best of our knowledge, no other metaheuristic employs the Softmin energy functional, computed as the Softmin of function values at particle positions, as the sole source of inter-particle interaction. This design enables provable escape from suboptimal local minima with a barrier bounded independently of the true barrier height (Theorem~\ref{thm:transition-time}, Section~\ref{sec:hitting-times}), together with a deterministic guarantee that the ensemble's best value never lags ordinary gradient flow under a Polyak--\L{}ojasiewicz condition (Theorem~\ref{thm:ensemble-min}, Section~\ref{sec:convergence-rate}). Section~\ref{sec:numerical-experiments} compares these predictions with experiments, reporting both where the observed behavior is consistent with the mechanism and where it is not.
+
+\paragraph{Langevin-based sampling and interacting-particle methods}
+Stochastic Gradient Langevin Dynamics (SGLD) \citep{welling2011bayesian} and its non-asymptotic analysis for non-convex optimization \citep{raginsky2017nonconvex} study a single diffusion whose drift is the gradient of the objective itself, with guarantees governed by the spectral gap of the associated Gibbs measure; when multiple particles are used, interaction typically enters only through averaging over independent runs. Interacting Particle Langevin Dynamics (IPLD) \citep{akyildiz2025interacting, encinar2025proximal} instead couples an ensemble of particles through their empirical measure, using this mean-field interaction to build unbiased or stabilized estimators of the marginal likelihood gradient in latent-variable models. Our construction is closer in spirit to IPLD, in that it also relies on genuine ensemble-level coupling rather than independent copies, but the interaction itself is different in kind: instead of pooling particles through an empirical average, the Softmin energy $J_\beta$ couples particles through their relative energies, producing a state-dependent, sign-changing effective learning rate $\prefactor{k}{\xx}$ that deterministically assigns each particle a minimizing or maximizing role (Theorem~\ref{thm:stationary-points}). It is this competitive, temperature-sharpened coupling, rather than mean-field averaging, that produces the barrier-capping mechanism of Theorem~\ref{thm:transition-time}, and it is aimed directly at global optimization of $f$ rather than at marginal-likelihood estimation.
+
+\paragraph{Connection to Statistical Physics and Functional Design}
+Our approach shares conceptual roots with population-based statistical physics methods such as Population Annealing (PA) \citep{Wang_2015}, which also employs a Gibbs-weighted ensemble to locate global ground states. However, while PA relies on discrete demographic selection, duplicating low-energy particles and eliminating high-energy ones prior to local Markov Chain Monte Carlo steps, our method maintains a fixed population size and drives exploration through continuous dynamical repulsion. This active exploration mechanism differentiates our Softmin energy functional from the standard log-sum-exp (or free-energy) functional, $F_\beta(\xx) = -{\beta}^{-1} \log \sum e^{-\beta f(x_i)}$. The gradient of the log-sum-exp formulation, $\nabla_{x_k} F_\beta(\xx) = w_k \nabla f(x_k)$, strictly preserves gradient descent, causing sub-optimal particles with small weights to simply stagnate. In contrast, the gradient of our proposed Softmin functional, $J_\beta(\xx) = \sum w_i f(x_i)$, natively incorporates the sign-changing effective learning rate, $\prefactor{k}{\xx}$. Consequently, rather than discarding trapped particles, the geometry of the Softmin functional actively destabilizes their local minima, forcing high-energy particles to hill-climb and escape via the energy barrier-flattening mechanism formalized in our theoretical analysis.
+
+\paragraph{Softmin energy} Theoretical work on the Gibbs Softmin (or Boltzmann Softmin) has primarily focused on its properties as a smooth approximation to the minimum operator \citep{bertsekas1999nonlinear}, convergence of softmax policy gradients in reinforcement learning \citep{mei2020global}, and its role in exploration–exploitation trade-offs via temperature scheduling \citep{song2019revisiting}. To our knowledge, this is the first work employing $J_\beta$ as an optimization objective for non-convex global search. This is conceptually distinct from swarm-gradient methods that anneal a mean-field particle density toward the Dirac mass at the global minimizer \citep{bolte2024swarm}: rather than acting on a population density, the Softmin energy couples particles directly through the relative ranking of their objective values. The effective barrier reduction via particle cooperation, analyzed in Theorem~\ref{thm:transition-time}, is previously unstudied.
+
+\section{Freidlin--Wentzell Large Deviation Theory}
+\label{apx:fw-theory}
+
+This appendix summarizes the background large deviation theory used by Theorem~\ref{thm:transition-time} and Corollary~\ref{cor:exit-time-conditional}. Consider a small-noise gradient diffusion on $\R^N$,
+\[
+    \dd\XX_t = -\nabla U(\XX_t)\dd t + \sqrt{2\sigma}\dd B_t,
+\]
+for a potential $U\in C^2(\R^N)$ and standard $N$-dimensional Brownian motion $(B_t)_{t\ge0}$; in our application $N=nd$ and $U=nJ_\beta$. As $\sigma\downarrow0$, sample paths of this diffusion concentrate around trajectories of the noiseless flow $\dot\XX_t=-\nabla U(\XX_t)$, and rare deviations from this flow are governed by the Freidlin--Wentzell large deviation principle \citep{freidlin2012random}. For an absolutely continuous path $\phi:[0,T]\to\R^N$, the Freidlin--Wentzell action is
+\begin{equation}
+    I_{0T}(\phi):=\frac14\int_0^T\bigl\|\dot\phi(t)+\nabla U(\phi(t))\bigr\|^2\dd t,
+    \label{eq:fw-action}
+\end{equation}
+and the quasipotential between a point $x\in\R^N$ and a closed set $A\subset\R^N$ is
+\begin{equation}
+    V(x,A):=\inf_{T>0}\ \inf_{\substack{\phi(0)=x\\ \phi(T)\in A}}I_{0T}(\phi).
+    \label{eq:fw-quasipotential}
+\end{equation}
+Intuitively, $I_{0T}(\phi)$ penalizes deviation from the noiseless flow, vanishing exactly along trajectories of $\dot\phi=-\nabla U(\phi)$; $V(x,A)$ is the cheapest such penalty over all paths from $x$ reaching $A$, and quantifies how atypical (large-deviation-improbable) it is for the diffusion to travel from $x$ to $A$ without the help of noise. The infimum in \eqref{eq:fw-quasipotential} need not be attained by any single finite-time path: it is generally only approximated arbitrarily well, e.g.\ by following the time-reversed noiseless flow toward $x$ and then the forward flow toward $A$, taking arbitrarily long to approach the relevant critical points. This is the sense in which the proof of Theorem~\ref{thm:transition-time} below computes exactly the minimal action along one specific channel of paths; the quasipotential itself is not computed, but bounded from above by that value, since it is an infimum over all paths.
+
+Under the standard hypotheses of Freidlin--Wentzell exit theory \citep{freidlin2012random} -- in particular that $D$ is a bounded domain with $x\in D$, that $x$ is the unique asymptotically stable equilibrium of the noiseless flow in $D$, and that $\partial D$ contains no other equilibria -- the exit time $\tau_D^\sigma$ of the diffusion from $D$, started at $x$, satisfies
+\begin{equation}
+    \lim_{\sigma\downarrow0}\sigma\log \E_x\tau_D^\sigma = V(x,\partial D).
+    \label{eq:fw-exit-theorem}
+\end{equation}
+
+For a gradient drift, the action of any path admits the exact decomposition
+\begin{equation}
+    I_{0T}(\phi) = U(\phi(T))-U(\phi(0)) + \frac14\int_0^T\bigl\|\dot\phi(t)-\nabla U(\phi(t))\bigr\|^2\dd t,
+    \label{eq:gradient-decomposition}
+\end{equation}
+obtained by expanding the square in \eqref{eq:fw-action} and completing it against $\dd U(\phi(t))/\dd t = \langle\nabla U(\phi(t)),\dot\phi(t)\rangle$. Consequently, any segment of $\phi$ that follows the noiseless flow \emph{downhill} (i.e.\ $\dot\phi=-\nabla U(\phi)$) contributes zero action, while a segment moving \emph{uphill} against the flow (i.e.\ $\dot\phi=\nabla U(\phi)$) costs exactly the potential increase along that segment. This identity is what allows the proof of Theorem~\ref{thm:transition-time} to compute exactly the minimal action along a specific channel of admissible paths, and hence to bound the quasipotential from above.
+
+\section{Technical Proofs}
+\label{apx:technical-proofs}
+
+Here we will collect some of the more technical proofs of the lemmas stated in the main body.
+
+\subsection{Proofs of Section~\ref{sec:gradient-flow-dynamics}}
+
+\begin{lemma}[Component gradient and Hessian at critical configurations]
+    \label{lem:derivative-of-J-proof}
+    Let $w_k = e^{-\beta f(x_k)}(\sum_j e^{-\beta f(x_j)})^{-1}$ denote the Gibbs weight of particle $x_k$, and let $\prefactor{k}{\xx} = nw_k\left[1 - \beta(f(x_k) - J_\beta(\xx))\right]$ be the dynamic pre-factor. Then
+    \begin{equation}
+        \nabla_{x_k} (nJ_\beta(\xx)) = \prefactor{k}{\xx} \nabla f(x_k),
+        \qquad
+        \sum_{k=1}^n \prefactor{k}{\xx} = n.
+        \label{eq:lemma-gradient}
+    \end{equation}
+    Moreover, for $k \neq \ell$ the mixed Hessian block is the outer product
+    \begin{equation}
+        \frac{\partial^2 (nJ_\beta(\xx))}{\partial x_\ell \partial x_k} = \nabla f(x_k)\bigl(\nabla_{x_\ell}\prefactor{k}{\xx}\bigr)^\top,
+        \label{eq:mixed-block}
+    \end{equation}
+    which vanishes whenever $\nabla f(x_k)=0$. Consequently, if $\xx$ is such that $\nabla f(x_k)=0$ for every $k$, then $\nabla(nJ_\beta(\xx))=0$ and the Hessian is block diagonal,
+    \begin{equation}
+        \nabla^2(nJ_\beta(\xx)) = \operatorname{blockdiag}\bigl(\prefactor{1}{\xx}\nabla^2 f(x_1),\dots,\prefactor{n}{\xx}\nabla^2 f(x_n)\bigr).
+        \label{eq:block-diagonal-hessian}
+    \end{equation}
+    Finally, if $\prefactor{k}{\xx}=0$ then $\frac{\partial^2(nJ_\beta(\xx))}{\partial x_k^2} = -n\beta w_k \nabla f(x_k)\nabla f(x_k)^\top$.
+\end{lemma}
+
+\begin{proof}
+    We compute the derivatives using the chain rule and the properties of the Gibbs weights. First, we establish the gradient of the weight $w_i$ with respect to $x_k$:
+    \begin{equation*}
+        \nabla_{x_k} w_i = \begin{cases}
+            \beta w_i w_k \nabla f(x_k) & \text{if } i \neq k, \\
+            -\beta w_k (1 - w_k) \nabla f(x_k) & \text{if } i = k.
+        \end{cases}
+    \end{equation*}
+    For the first derivative of $nJ_\beta(\xx) = n\sum_i w_i f(x_i)$, an identical computation to the main text gives $\nabla_{x_k}(nJ_\beta(\xx)) = nw_k[1-\beta(f(x_k)-J_\beta(\xx))]\nabla f(x_k) = \prefactor{k}{\xx}\nabla f(x_k)$; summing over $k$ and using $\sum_k w_k=1$, $\sum_k w_kf(x_k)=J_\beta(\xx)$, gives $\sum_k\prefactor{k}{\xx}=n[1-\beta(J_\beta(\xx)-J_\beta(\xx))]=n$.
+
+    For the mixed second derivative ($k\ne\ell$), we differentiate $\nabla_{x_k}(nJ_\beta(\xx))=\prefactor{k}{\xx}\nabla f(x_k)$ with respect to $x_\ell$. Because $\nabla f(x_k)$ is independent of $x_\ell$, the Jacobian matrix is the outer product $\nabla f(x_k)(\nabla_{x_\ell}\prefactor{k}{\xx})^\top$. Substituting $\nabla_{x_\ell}w_k=\beta w_kw_\ell\nabla f(x_\ell)$ and $\nabla_{x_\ell}J_\beta(\xx)=\frac1n\prefactor{\ell}{\xx}\nabla f(x_\ell)$,
+    \begin{align*}
+        \nabla_{x_\ell}\prefactor{k}{\xx} &= n(\nabla_{x_\ell}w_k)\left[1-\beta(f(x_k)-J_\beta(\xx))\right] + nw_k\beta\left(\nabla_{x_\ell}J_\beta(\xx)\right) \\
+        &= \beta w_\ell\bigl(nw_k[1-\beta(f(x_k)-J_\beta(\xx))]\bigr)\nabla f(x_\ell) + \beta w_k\prefactor{\ell}{\xx}\nabla f(x_\ell) \\
+        &= \beta\left[w_\ell\prefactor{k}{\xx}+w_k\prefactor{\ell}{\xx}\right]\nabla f(x_\ell),
+    \end{align*}
+    which gives \eqref{eq:mixed-block} and vanishes whenever $\nabla f(x_k)=0$ (or symmetrically $\nabla f(x_\ell)=0$). If $\nabla f(x_k)=0$ for every $k$, every off-diagonal block vanishes and \eqref{eq:lemma-gradient} gives $\nabla(nJ_\beta(\xx))=0$; the diagonal block computed below then reduces to $\prefactor{k}{\xx}\nabla^2f(x_k)$, giving the block-diagonal form \eqref{eq:block-diagonal-hessian}.
+
+    Finally, for the diagonal block ($k=\ell$), applying the product rule to $\nabla_{x_k}(nJ_\beta(\xx))=\prefactor{k}{\xx}\nabla f(x_k)$ includes the local Hessian $\nabla^2 f(x_k)$:
+    \[
+        \frac{\partial^2(nJ_\beta(\xx))}{\partial x_k^2} = \prefactor{k}{\xx}\nabla^2f(x_k) + \nabla f(x_k)\bigl(\nabla_{x_k}\prefactor{k}{\xx}\bigr)^\top.
+    \]
+    Using $\nabla_{x_k}w_k=-\beta w_k(1-w_k)\nabla f(x_k)$ and $\nabla_{x_k}J_\beta(\xx)=\frac1n\prefactor{k}{\xx}\nabla f(x_k)$, a computation identical in structure to the mixed case gives
+    \[
+        \nabla_{x_k}\prefactor{k}{\xx} = -\beta\left[nw_k+\prefactor{k}{\xx}-2w_k\prefactor{k}{\xx}\right]\nabla f(x_k),
+    \]
+    so that, substituting back,
+    \[
+        \frac{\partial^2(nJ_\beta(\xx))}{\partial x_k^2} = \prefactor{k}{\xx}\nabla^2f(x_k) - \beta\left[nw_k+\prefactor{k}{\xx}-2w_k\prefactor{k}{\xx}\right]\nabla f(x_k)\nabla f(x_k)^\top,
+    \]
+    which reduces to $-n\beta w_k\nabla f(x_k)\nabla f(x_k)^\top$ when $\prefactor{k}{\xx}=0$. \qedhere
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:stationary-points}]
+    A locally asymptotically stable equilibrium of the gradient flow \eqref{eq:gradient-flow} is an isolated local minimum of $nJ_\beta$: indeed $\frac{d}{dt}(nJ_\beta(\xx(t)))=-\|\nabla(nJ_\beta)\|^2\le0$, so if points arbitrarily close to $\bar\xx$ had strictly smaller value the trajectories starting there could not converge to $\bar\xx$; and a non-isolated equilibrium admits nearby constant trajectories that likewise do not converge to $\bar\xx$.
+
+    Fix $k$ and freeze the other particles at $\bar x_j$, $j\ne k$. Since $nJ_\beta$ depends on $x_k$ only through $r=f(x_k)$, we may write
+    \[
+        nJ_\beta(\bar x_1,\dots,x_k,\dots,\bar x_n)=g(f(x_k)), \qquad g(r):=n\,\frac{re^{-\beta r}+C_1}{e^{-\beta r}+C_0},
+    \]
+    with $C_0:=\sum_{j\ne k}e^{-\beta f(\bar x_j)}>0$ and $C_1:=\sum_{j\ne k}f(\bar x_j)e^{-\beta f(\bar x_j)}$. By the chain rule and Lemma~\ref{lem:derivative-of-J-proof}, wherever $\nabla f(x_k)\ne0$ one has $g'(f(x_k))=\prefactor{k}{\xx}$; by continuity of both sides in $f(x_k)$, $g'(f(\bar x_k))=\prefactor{k}{\bar\xx}$. Writing $g'(r)=n\omega(r)[1-\beta(r-g(r)/n)]$ with $\omega(r)=e^{-\beta r}/(e^{-\beta r}+C_0)\in(0,1)$, a direct computation shows that at any critical point $r_0$ of $g$ (where the bracket vanishes), $g''(r_0)=-n\beta\omega(r_0)<0$.
+
+    \emph{Step 1: $\prefactor{k}{\bar\xx}\ne0$.} Suppose $\prefactor{k}{\bar\xx}=0$. By the above, $r_0=f(\bar x_k)$ is a critical point of $g$, and it is a strict local maximum. If $f$ is non-constant near $\bar x_k$, there are points $y$ arbitrarily close to $\bar x_k$ with $f(y)$ close to but different from $r_0$, whence $nJ_\beta(\dots,y,\dots)=g(f(y))<g(r_0)=nJ_\beta(\bar\xx)$, contradicting local minimality. If $f$ is constant near $\bar x_k$, moving $x_k$ within that level set leaves every objective value, Gibbs weight, and gradient unchanged, producing a continuum of equilibria arbitrarily close to $\bar\xx$ and contradicting isolation. Hence $\prefactor{k}{\bar\xx}\ne0$.
+
+    \emph{Step 2: $\nabla f(\bar x_k)=0$.} Since $\prefactor{k}{\bar\xx}\ne0$, $g'(f(\bar x_k))\ne0$, so $g$ is strictly monotone near $f(\bar x_k)$. If $\nabla f(\bar x_k)\ne0$, then $f$ takes values on both sides of $f(\bar x_k)$ arbitrarily near $\bar x_k$; strict monotonicity of $g$ then yields nearby configurations with $nJ_\beta<nJ_\beta(\bar\xx)$, contradicting local minimality. Hence $\nabla f(\bar x_k)=0$.
+
+    \emph{Step 3: classification.} If $\prefactor{k}{\bar\xx}>0$, then $g$ is strictly increasing near $f(\bar x_k)$, so local minimality of $nJ_\beta$ forces $f(x_k)\ge f(\bar x_k)$ for $x_k$ near $\bar x_k$; thus $\bar x_k$ is a local minimum of $f$. If $\prefactor{k}{\bar\xx}<0$, the symmetric argument shows $\bar x_k$ is a local maximum. Because $nw_k>0$, the sign of $\prefactor{k}{\bar\xx}$ is that of $1-\beta(f(\bar x_k)-J_\beta(\bar\xx))$, giving the stated threshold. Finally, $\sum_k\prefactor{k}{\bar\xx}=n$ forces some $\prefactor{k}{\bar\xx}>0$, so at least one particle is at a local minimum of $f$.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:ensemble-min}]
+    Fix $t$ and let $i$ attain the minimum, $f(x_i(t))=m(t)$. Since $f(x_i(t))\le f(x_j(t))$ for all $j$, we have $e^{-\beta_tf(x_j(t))}\le e^{-\beta_tf(x_i(t))}$, hence $\sum_je^{-\beta_tf(x_j(t))}\le ne^{-\beta_tf(x_i(t))}$ and therefore $nw_i(t)\ge1$. As $J_{\beta_t}(\xx(t))$ is a convex combination of the values $f(x_j(t))$, it satisfies $J_{\beta_t}(\xx(t))\ge f(x_i(t))$, so $1-\beta_t(f(x_i(t))-J_{\beta_t}(\xx(t)))\ge1$. Multiplying,
+    \begin{equation}
+        \prefactor{i}{\xx(t)}\ge1 \qquad \text{for every } i \text{ attaining the minimum at } t.
+        \label{eq:ai-ge-1}
+    \end{equation}
+    Along such a particle,
+    \[
+        \frac{d}{dt}f(x_i(t)) = \langle\nabla f(x_i(t)),\dot x_i(t)\rangle = -\prefactor{i}{\xx(t)}\|\nabla f(x_i(t))\|^2 \le -\|\nabla f(x_i(t))\|^2.
+    \]
+
+    Consider $m=\min_k g_k$ with $g_k(t)=f(x_k(t))$. Since $\beta_t$ is only assumed measurable, each $x_k$ is a Carath\'eodory solution and hence absolutely continuous; as $f$ has locally Lipschitz gradient, each $g_k$ is absolutely continuous on compact time intervals, and a pointwise minimum of finitely many absolutely continuous functions is absolutely continuous. Therefore $m$ is absolutely continuous, and $m$ together with every $g_k$ is differentiable at a.e.\ $t$. At any such $t$, choose $i$ attaining the minimum; the function $g_i-m\ge0$ is then differentiable at $t$ and vanishes there, so it has zero derivative at $t$, giving $m'(t)=g_i'(t)$. Combined with the previous display,
+    \[
+        m'(t)=-\prefactor{i}{\xx(t)}\|\nabla f(x_i(t))\|^2\le-\|\nabla f(x_i(t))\|^2\le0 \qquad \text{for a.e. } t.
+    \]
+    Integrating, $m$ is nonincreasing, so every minimizing particle stays in $S_0=\{x:f(x)\le m(0)\}$, where the Polyak--\L{}ojasiewicz condition (Definition~\ref{def:pl-condition}) applies:
+    \[
+        m'(t)\le-\|\nabla f(x_i(t))\|^2\le-2\mu\bigl(f(x_i(t))-f_\star\bigr)=-2\mu\bigl(m(t)-f_\star\bigr).
+    \]
+    Setting $y(t):=e^{2\mu t}(m(t)-f_\star)$, which is absolutely continuous, we get $y'(t)=e^{2\mu t}[m'(t)+2\mu(m(t)-f_\star)]\le0$ for a.e.\ $t$, so $y(t)\le y(0)$, i.e.
+    \[
+        m(t)-f_\star\le e^{-2\mu t}\bigl(m(0)-f_\star\bigr), \qquad t\ge0. \qedhere
+    \]
+\end{proof}
+
+\begin{remark}[Global existence]
+    \label{rem:global-existence}
+    Theorem~\ref{thm:ensemble-min} presupposes a global solution. Since $m$ is nonincreasing, every particle attaining the running minimum stays in the compact sublevel set $S_0$ when $f$ is coercive; the theorem controls these particles only. Maximizing particles ($\prefactor{k}{\xx(t)}<0$) are not controlled by this estimate, but they are damped strongly enough that blow-up is easy to exclude. Write $u_k(t):=f(x_k(t))-m(t)\ge0$. From $\sum_je^{-\beta_tf(x_j)}\ge e^{-\beta_tm}$ we get $w_k\le e^{-\beta_tu_k}$, and hence $\beta_t\bigl(J_{\beta_t}(\xx)-m\bigr)=\beta_t\sum_jw_ju_j\le\beta_t\sum_ju_je^{-\beta_tu_j}\le n/e$. Therefore
+    \[
+        |\prefactor{k}{\xx(t)}|\;\le\; n\bigl(1+\beta_tu_k+n/e\bigr)e^{-\beta_tu_k}\;\le\;n\bigl(1+n/e\bigr),
+    \]
+    using $(1+v)e^{-v}\le1$ and $e^{-v}\le1$ for $v\ge0$. The pre-factor is thus bounded uniformly and decays exponentially in the particle's energy gap, so for coercive $f$ whose gradient grows at most polynomially in $f$ the drift stays bounded along trajectories and global solutions exist. We nonetheless state the theorem for a given global solution, since its conclusion concerns only the minimizing particles.
+\end{remark}
+
+
+\subsection{Proofs of Section~\ref{sec:hitting-times}}
+
+\begin{remark}[Metastability of the initial state]
+\label{rem:metastable-init}
+At the consensus configuration $\bar\xx=(z_-,\dots,z_-)$, every Gibbs weight equals $1/n$, so $\prefactor{k}{\bar\xx}\equiv1$ for every $k$. By Corollary~\ref{cor:stability-sufficient}, using $f''(z_-)>0$, $\bar\xx$ is therefore a strict local minimum of $nJ_\beta$ and a locally asymptotically stable equilibrium of \eqref{eq:gradient-flow}, i.e.\ genuinely metastable for the noisy dynamics \eqref{e:sde} at small $\sigma$.
+\end{remark}
+
+\begin{proof}[Proof of Lemma~\ref{lem:channel-invariant}]
+Since $z_-$ is a critical point of $f$, every frozen coordinate satisfies $\dot x_j=-\prefactor{j}{\Gamma(x)}f'(z_-)=0$ by \eqref{eq:gradient-flow}, so $\{\Gamma(x):x\in\R\}$ is invariant. Differentiating \eqref{eq:reduced-potential} along the channel gives $W'(x)=\frac{d}{dx}\bigl[nJ_\beta(\Gamma(x))\bigr]=u'(r(x))r'(x)=u'(r(x))f'(x)$; applying the chain rule directly to $nJ_\beta$ and \eqref{eq:softmin-gradient} gives the same derivative as $\prefactor{1}{\Gamma(x)}f'(x)$. Hence $W'(x)=\prefactor{1}{\Gamma(x)}f'(x)$, matching the active coordinate's drift $-\prefactor{1}{\Gamma(x)}f'(x)$ in \eqref{eq:gradient-flow}, and in particular reproving $\prefactor{1}{\Gamma(x)}=u'(r(x))$, made explicit in closed form in Lemma~\ref{lem:channel-drift} below.
+\end{proof}
+
+\begin{proof}[Proof of Lemma~\ref{lem:channel-drift}]
+    Write $r:=r(x)$. Factoring $e^{-\beta f(z_-)}$ out of the Gibbs weights at $\Gamma(x)$,
+    \[
+        w_1(\Gamma(x))=\frac{e^{-\beta r}}{n-1+e^{-\beta r}}, \qquad w_j(\Gamma(x))=\frac{1}{n-1+e^{-\beta r}} \quad (j\ge2),
+    \]
+    whence $J_\beta(\Gamma(x))-f(z_-)=re^{-\beta r}/(n-1+e^{-\beta r})=u(r)/n$, which is \eqref{eq:reduced-potential}. Therefore
+    \[
+        f(x)-J_\beta(\Gamma(x)) = r-\frac{re^{-\beta r}}{n-1+e^{-\beta r}} = \frac{(n-1)r}{n-1+e^{-\beta r}},
+    \]
+    and substituting into $\prefactor{1}{\Gamma(x)}=nw_1(\Gamma(x))[1-\beta(f(x)-J_\beta(\Gamma(x)))]$ gives
+    \[
+        \prefactor{1}{\Gamma(x)} = \frac{ne^{-\beta r}}{n-1+e^{-\beta r}}\cdot\frac{n-1+e^{-\beta r}-\beta(n-1)r}{n-1+e^{-\beta r}} = \frac{ne^{-\beta r}q(r)}{(n-1+e^{-\beta r})^2}.
+    \]
+    Differentiating \eqref{eq:reduced-potential} directly yields the same expression for $u'(r)$, proving \eqref{eq:a1-equals-uprime}, consistently with the identity $\prefactor{1}{\Gamma(x)}=u'(r(x))$ already established in Lemma~\ref{lem:channel-invariant}. In particular $\prefactor{1}{\Gamma(x)}=0$ if and only if $q(r)=0$, which by the displayed formula for $f(x)-J_\beta$ is equivalent to $f(x)-J_\beta(\Gamma(x))=1/\beta$, i.e.\ to the vanishing of the Softmin threshold gap of the active particle.
+
+    Since $q'(r)=-\beta(n-1)-\beta e^{-\beta r}<0$ for all $r\in\R$, $q(0)=n>0$, and $q(r)\to-\infty$ as $r\to\infty$, $q$ has a unique zero $r_c>0$. From $q(1/\beta)=e^{-1}>0$ we get $r_c>1/\beta$; and $q(r_c)=0$ reads $(n-1)(\beta r_c-1)=e^{-\beta r_c}<1$, giving $\beta r_c<n/(n-1)$. This is \eqref{eq:rc-location}. As $ne^{-\beta r}/(n-1+e^{-\beta r})^2>0$, the sign of $u'$ is the sign of $q$, so $u$ is strictly increasing on $(-\infty,r_c]$ and strictly decreasing on $[r_c,\infty)$.
+\end{proof}
+
+
+\begin{proof}[Proof of Theorem~\ref{thm:transition-time}]
+    \emph{Part 1.} For $r\le0$ we have $u(r)\le0$. For $r>0$, since $n-1+e^{-\beta r}>n-1$,
+    \[
+        u(r)<\frac{n}{n-1}re^{-\beta r}\le\frac{n}{n-1}\max_{\rho\ge0}\rho e^{-\beta\rho}=\frac{n}{e(n-1)\beta},
+    \]
+    the maximum being attained at $\rho=1/\beta$. Hence $u_c=\max_\R u<n/(e(n-1)\beta)$, which is \eqref{eq:barrier-cap}; the bound on $r_c$ is \eqref{eq:rc-location}.
+
+    \emph{Part 2.} A channel path has the form $\phi(t)=\Gamma(\psi(t))$; the frozen coordinates stay at the critical point $z_-$, so their drift vanishes and, with $W(x):=u(r(x))$, the action reduces to $I_{0T}=\frac14\int_0^T|\dot\psi+W'(\psi)|^2\dd t$. The one-dimensional version of \eqref{eq:gradient-decomposition} is
+    \[
+        I_{0T}=W(\psi(T))-W(\psi(0))+\frac14\int_0^T|\dot\psi-W'(\psi)|^2\dd t.
+    \]
+    By \eqref{eq:adjacent-well-monotonicity}, $r$ is a strictly increasing bijection from $[z_-,s]$ onto $[0,h]$, so there is a unique $x_m\in(z_-,s]$ with $r(x_m)=\min\{h,r_c\}$. On $[z_-,x_m]$ we have $r(x)\le r_c$, so by Lemma~\ref{lem:channel-drift} $W$ is strictly increasing there, with total rise $W(x_m)-W(z_-)=u_h$; on $[x_m,s]$ we have $r(x)\ge r_c$, so $W$ is nonincreasing. Every continuous channel path from $z_-$ to $s$ passes through $x_m$, and applying the displayed decomposition to the sub-path up to the first hitting time of $x_m$ bounds the action from below by $u_h$. This value is attained in the quasipotential sense by following the reversed deterministic flow from $z_-$ up to $x_m$ (cost exactly $u_h$) and then the forward flow toward $s$ at zero additional cost, with the standard finite-time approximations near the critical points. Therefore the channel quasipotential equals $u_h$, and since $V_\beta$ is an infimum over the larger class of all paths in $\R^n$,
+    \[
+        V_\beta(\Gamma(z_-),\Gamma(s))\le u_h.
+    \]
+    Because $u(r)/r=ne^{-\beta r}/(n-1+e^{-\beta r})<1$ for $r>0$, we have $u_h<\min\{h,r_c\}\le h$, which gives \eqref{eq:initial-bound}.
+
+    \emph{Part 3.} Assume $r_c<h$. At $\Gamma(s)$ every particle sits at a critical point of $f$ (either $s$ or $z_-$). For the active particle, \eqref{eq:a1-equals-uprime} gives $\prefactor{1}{\Gamma(s)}=u'(h)<0$ because $h>r_c$, and $f''(s)<0$ since $s$ is a nondegenerate maximum. For a frozen particle at $z_-$,
+    \[
+        \prefactor{j}{\Gamma(s)} = nw_j(\Gamma(s))\bigl[1+\beta\bigl(J_\beta(\Gamma(s))-f(z_-)\bigr)\bigr]>0
+    \]
+    by \eqref{eq:reduced-potential}, since $J_\beta(\Gamma(s))-f(z_-)=u(h)/n>0$, and $f''(z_-)>0$. Hence Corollary~\ref{cor:stability-sufficient} applies and $\Gamma(s)$ is a strict local minimum of $nJ_\beta$. On the $z_-$ side, $r$ decreases strictly from $h$ through $r_c$ as $x$ moves from $s$ toward $z_-$ (recall $x_m\in(z_-,s)$ is where $r(x_m)=r_c$, well-defined since $r_c<h$), so the channel well at $\Gamma(s)$ has barrier $u_c-u(h)$ on this side unconditionally --- this uses only $r_c<h$, not $\rho_+$.
+
+    The $z_+$ side depends on $\rho_+$. On $(s,z_+)$, $r$ decreases strictly from $h$ to $\rho_+$ by \eqref{eq:adjacent-well-monotonicity}--\eqref{eq:relative-energy}.
+
+    If $\rho_+<r_c$, then $r$ crosses $r_c$ on this interval, so there is a unique $\xi_+$ with $r(\xi_+)=r_c$. Between $s$ and $\xi_+$ the reduced potential rises from $u(h)$ to $u_c$; the gradient-action argument of Part 2 gives channel action $u_c-u(h)$, and since $0<u(h)<u_c$ we obtain \eqref{eq:post-saddle-bound}, so the well has matching barrier heights on both sides. Finally, for $x\in(\xi_+,z_+)$ we have $r(x)<r_c$, hence $\prefactor{1}{\Gamma(x)}=u'(r(x))>0$ by \eqref{eq:a1-equals-uprime}, while $f'(x)<0$; therefore the active coordinate of the deterministic channel flow satisfies $\dot x=-\prefactor{1}{\Gamma(x)}f'(x)>0$, driving the particle toward $z_+$. Concatenating the admissible path of Part 2 (from $\Gamma(z_-)$ to $\Gamma(s)$, action $u_h$) with this one (from $\Gamma(s)$ to $\Gamma(\xi_+)$, action $u_c-u(h)$) gives an admissible path from $\Gamma(z_-)$ to $\Gamma(\xi_+)$ of total action $u_h+(u_c-u(h))$, proving \eqref{eq:two-stage-bound}.
+
+    If instead $\rho_+\ge r_c$, then $r(x)\in[r_c,h)$ for every $x\in(s,z_+)$: the interval lies entirely on the decreasing side of $u$, where $u$ is strictly decreasing in $r$ while $r$ is strictly decreasing in $x$, so $u(r(x))$ is strictly increasing in $x$ throughout $(s,z_+)$, from $u(h)$ to $u(\rho_+)$. No interior peak occurs, so no point $\xi_+$ with $r(\xi_+)=r_c$ exists in $(s,z_+)$: the channel potential rises monotonically to $\Gamma(z_+)$ with no intermediate barrier to cross, and the total rise $u(\rho_+)-u(h)$ is at most the $z_-$-side barrier $u_c-u(h)$, since $u(\rho_+)\le u_c$. In this regime $\prefactor{1}{\Gamma(z_+)}=u'(\rho_+)\le0$ while $f''(z_+)>0$, so by Theorem~\ref{thm:stationary-points} $\Gamma(z_+)$ is not itself a stable equilibrium, and no post-saddle well forms on this side.
+
+    If instead $h\le r_c$, then $r(x)\le h\le r_c$ for $x$ near $s$, with equality only at $x=s$, and the strict monotonicity of $u$ on $(-\infty,r_c]$ shows that $x\mapsto u(r(x))$ has a strict local maximum at $s$. Hence $\Gamma(s)$ is not a local minimum of $nJ_\beta$.
+\end{proof}
+
+
+\section{Discussion of the Barrier-Flattening Theorem}
+\label{apx:barrier-discussion}
+
+This appendix collects the discussion of Theorem~\ref{thm:transition-time} that the main text condenses: the low-barrier regime and the comparison with independent Langevin dynamics in full, the scope of the theorem, and the extension to higher dimensions together with the inverse-temperature schedule.
+
+\begin{remark}[Low-barrier regime: quasipotential reduction without sign reversal]
+\label{rem:low-barrier-full}
+By \eqref{eq:a1-equals-uprime}, $\prefactor{1}{\Gamma(x)}>0$ precisely when $r(x)<r_c$. Hence $u_h=u(h)$, i.e.\ $\min\{h,r_c\}=h$, exactly in the regime $h\le r_c$, and there the drift of the active particle is minimizing along the entire crossing: the sign-reversal mechanism is never activated, the crossing is made entirely against the drift, and by Theorem~\ref{thm:transition-time}(3) no Softmin-induced well appears at $s$. The quasipotential reduction is nonetheless strict, since $u(r)/r=ne^{-\beta r}/(n-1+e^{-\beta r})<1$ for $r>0$ gives $u(h)<h$. In this regime the gain comes purely from the Gibbs-weight damping of the leading particle's contribution to $nJ_\beta$, not from a sign reversal. By \eqref{eq:rc-location} the regime is $h\lesssim\beta^{-1}$; the sign-reversal mechanism is what handles barriers beyond that scale.
+\end{remark}
+
+\begin{remark}[Interpretation and scope]
+\label{rem:scope}
+Part 1 shows that, along this channel, an arbitrarily high physical barrier $h$ is flattened to a level of order $\beta^{-1}$: as $h$ grows the active particle receives exponentially small Gibbs weight, so the barrier saturates rather than growing with $h$. Part 2 gives a strict full-system \emph{upper} bound on the exit exponent through an explicit admissible path; because $V_\beta$ is an infimum over all paths in $\R^n$, the channel construction can only over-estimate it. It is a bound on the Freidlin--Wentzell quasipotential itself, established by exhibiting an admissible path; it does not yet assert anything about $\E\tau^\sigma$, for which see Corollary~\ref{cor:exit-time-conditional}. Part 3 addresses the post-saddle obstruction: a high barrier turns the physical maximum $s$ into a Softmin-induced well. When $\rho_+<r_c$ this well has equal-height barriers, with depth $u_c-u(h)$ strictly below the initial barrier $u_c$, so it is not a worse obstruction than the one already crossed, giving the composite two-stage bound \eqref{eq:two-stage-bound}; when $\rho_+\ge r_c$ the $z_+$ side presents no intermediate barrier at all, and its monotone rise $u(\rho_+)-u(h)$ is itself bounded by $u_c-u(h)$, so this case is only more favorable. We emphasize that \eqref{eq:two-stage-bound} bounds a quasipotential, for which the two costs do add. If $\Gamma(s)$ were itself metastable in the sense of Corollary~\ref{cor:exit-time-conditional}, so that the two crossings are traversed as successive escapes each restarting the clock, the resulting exit-time exponent would instead be governed by the larger of them, $\max\{u_h,u_c-u(h)\}\le u_c$, since the dominant crossing would set the asymptotic rate; we do not establish that here. The theorem does \emph{not} identify the exact transition exponent between the two basins, which would require ruling out returns to the initial basin and competing collective paths in $\R^n$.
+\end{remark}
+
+\begin{remark}[Comparison with independent Langevin dynamics]
+\label{rem:comparison-full}
+For a single overdamped Langevin particle in the potential $f$ started at $z_-$, the classical small-noise exit exponent from the basin of $z_-$ is the physical barrier $h=f(s)-f(z_-)$. For $n$ \emph{independent} copies, the first of the $n$ exit times has the same exponential scale $h$: taking a minimum over $n$ i.i.d.\ variables with common exponential rate $h/\sigma$ changes only the multiplicative pre-factor, by a factor $1/n$, not the exponent, as $\sigma\downarrow0$.
+
+By \eqref{eq:initial-bound}, the channel construction gives $V_\beta(\Gamma(z_-),\Gamma(s))\le u_h<h$ for the joint Softmin diffusion, in \emph{every} regime of $h$ (see Remark~\ref{rem:low-barrier}). This is a comparison of an \emph{upper bound on a quasipotential} for the interacting system against the \emph{exact} exponent $h$ of the noninteracting one; it shows the admissible channel gives a strictly lower quasipotential bound than independent escape, not that the true joint exit exponent is smaller. The stronger, exit-\emph{time} statement that the interaction cannot slow escape holds only under the hypotheses of Corollary~\ref{cor:exit-time-conditional}, which are not verified in this paper.
+\end{remark}
+
+\begin{remark}[Higher dimensions, temperature, and scale]
+\label{rem:higher-dim}
+The channel identity of Part 1 extends algebraically to $d>1$: at a critical point $s$ of $f$ the active Hessian block is $u'(h)\nabla^2 f(s)$, so if $s$ is an index-one saddle and $u'(h)<0$ the induced local minimum is a genuinely one-dimensional phenomenon, and transverse unstable directions may open cheaper escape routes. Although Theorem~\ref{thm:ensemble-min} holds for an arbitrary schedule $\beta_t$, and Section~\ref{sec:hitting-times} fixed $\beta$ purely for tractability of the exit-time analysis, a natural question is whether annealing $\beta$ helps in practice. Regarding temperature, the fixed-$\beta$ bound \eqref{eq:barrier-cap} decreases like $\beta^{-1}$, favoring large $\beta$ for barrier reduction; but large $\beta$ also suppresses the drift of non-leading particles through their Gibbs weights, since a particle trailing the ensemble minimum by a gap $\Delta$ is weighted by $e^{-\beta\Delta}$. Both limits degrade the mechanism: as $\beta\to\infty$ the ensemble degenerates to leader-only drift, while as $\beta\to0$ the Softmin coupling degenerates toward independent noisy gradient descent and \eqref{eq:barrier-cap}'s bound itself diverges. A decaying (or, symmetrically, an increasing) schedule $\beta_t$ is a natural candidate for balancing these two effects over time; however, we found empirically that neither improves on a well-chosen \emph{fixed} $\beta$ on the analytic benchmarks considered here. Both a geometric decay from a large starting $\beta$ and a geometric growth from a small one consistently reach the target \emph{more slowly} than a fixed $\beta$ tuned once via the diagnostic of Appendix~\ref{app:hyperparameters}, with the gap widening at harder barrier heights, and an aggressive growth rate can drive $\beta$ to numerical overflow before the schedule ever reaches a useful range. We report this as a negative empirical result rather than infer a general claim about annealing from it: a rigorous large-deviation treatment of $\beta_t$, and of whether some other schedule shape or landscape can realize the exploration/refinement trade-off this remark motivates, remain open.
+\end{remark}
+
+\section{Appendix: Experimental Details and Hyperparameters}
+\label{app:hyperparameters}
+
+To ensure full reproducibility of the numerical experiments presented in Section~\ref{sec:numerical-experiments}, this appendix details the hyperparameters and initialization schemes used across all benchmark landscapes. All continuous-time dynamics were discretized using the Euler-Maruyama method. The source code used to execute these experiments is publicly available at \citep{softmin_energy_2026}.
+
+Algorithm~\ref{alg:softmin} states the discretized method exactly as run.
+
+\begin{algorithm}[!htbp]
+\caption{Softmin energy dynamics: Euler--Maruyama discretization of \eqref{e:sde}.}
+\label{alg:softmin}
+\begin{algorithmic}[1]
+\Require objective $f$ and gradient $\nabla f$; ensemble size $n$; inverse temperature $\beta$; step size $\eta$; noise intensity $\sigma$; box $B$ with coordinatewise projection $\Pi_B$; horizon $T$
+\State draw $x_1,\dots,x_n$ i.i.d.\ uniformly on the initialization region (Table~\ref{tab:general_settings})
+\For{$t=1,\dots,T$}
+    \State $f_k\gets f(x_k)$ for every $k$, and $f_\ast\gets\min_j f_j$
+    \State $w_k\gets e^{-\beta(f_k-f_\ast)}\bigl/\sum_{j}e^{-\beta(f_j-f_\ast)}$ \Comment{shifted for numerical stability}
+    \State $J\gets\sum_k w_kf_k$ \Comment{Softmin energy \eqref{eq:Softmin-energy}}
+    \State $\prefactor{k}{\xx}\gets nw_k\bigl[1-\beta(f_k-J)\bigr]$ for every $k$ \Comment{pre-factor \eqref{eq:softmin-gradient}}
+    \State $x_k\gets\Pi_B\bigl(x_k-\eta\,\prefactor{k}{\xx}\nabla f(x_k)+\sqrt{2\sigma\eta}\,\xi_k\bigr)$, \ $\xi_k\sim\mathcal{N}(0,I_d)$ i.i.d.
+\EndFor
+\State \Return $\argmin_{x_k}f(x_k)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Hardware and Computational Resources}
+All numerical experiments were executed on an academic scientific-computing cluster. To fully leverage the vectorized nature of the simulations and evaluate independent trials in parallel, jobs were strictly allocated to a single compute node at a time. The cluster nodes utilized for these experiments include:
+\begin{itemize}
+    \item \textbf{High-Capacity Nodes:} AMD EPYC 7763 processors featuring 128 physical cores (64 cores per socket, 2 sockets, 256 logical threads) and 2 TB of RAM. Each also hosts four NVIDIA A40 GPUs (48 GB), one of which was allocated per job for the transformer benchmark (Section~\ref{sec:transformer}), the only experiment run on a GPU.
+    \item \textbf{Standard Nodes:} Intel Xeon CPU E5-2650 v4 @ 2.20GHz featuring 24 physical cores (12 cores per socket, 2 sockets) and 256 GB of RAM. These nodes were specifically utilized to parallelize the independent runs of the experiments using Python's \texttt{multiprocessing} framework.
+\end{itemize}
+
+\subsection{General Experimental Settings}
+Table~\ref{tab:general_settings} summarizes the shared parameters utilized across all algorithms for each specific landscape. Within each benchmark, the swarm size and maximum step limit are the same for every algorithm, to provide a fair baseline for evaluating the topological escape mechanisms. The domain bounds listed below are enforced by clipping each coordinate back into the box after every discrete update, identically for every algorithm. Domain bounds for the 1D and 2D wells are derived directly from each landscape's own critical points rather than set by hand: the domain extends $K=5$ natural harmonic fluctuation-lengthscales ($1/\sqrt{f''}$ at the relevant minimum, or the softest Hessian eigendirection in 2D) beyond the outermost minimum -- the same role a $5\sigma$ truncation plays for a locally-Gaussian process, giving negligible boundary-contamination probability without an oversized domain. A fixed absolute margin was checked and found to represent anywhere from $\sim\!1$ to $\sim\!5.5$ lengthscales across the swept difficulty range, an uncalibrated $>\!5\times$ inconsistency this formula removes. The quadruple well is swept over $A\in\{2,\dots,30\}$ (not $1$): at $A=1$ the softest Hessian eigenvalue at the well vanishes exactly, so the landscape does not yet have a genuine local minimum in that direction.
+
+\begin{table}[!htbp]
+\centering
+\caption{General settings and landscape configurations.}
+\label{tab:general_settings}
+\small
+\begin{tabular}{@{}lp{0.62\textwidth}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value / Description} \\
+\midrule
+Swarm Size ($n$) & 100 (1D/2D wells, Ackley, Lennard-Jones); swept over $\{5,\dots,400\}$ in the ensemble-size study (Section~\ref{sec:particle-sweep}); 10 for the transformer, where each step costs $n$ full forward/backward passes \\
+Independent Runs & 100 (1D/2D wells, Ackley, ensemble-size study), 30 (Lennard-Jones), 5 (transformer); additional confirmation runs in Appendices~\ref{apx:particle-sweep} and~\ref{apx:transformer} \\
+Max Step Limit & $10^7$ (1D/2D wells, Ackley, ensemble-size study), $10^5$ (Lennard-Jones), $2\times10^3$ (transformer) \\
+Gradient Clipping & Per-atom norm $1$ on the Lennard-Jones term; per-particle norm $10$ (transformer); none otherwise; same for every algorithm \\
+\midrule
+\textbf{1D Double Well} & $f(x) = x^4 - \delta x^2 + 0.05x$, swept over $\delta\in\{1,\dots,30\}$ (asymmetric: the linear tilt breaks the left/right symmetry, giving a genuinely suboptimal starting basin -- see Appendix~\ref{app:hyperparameter-methodology}) \\
+Initialization & Uniformly sampled around the shallower (suboptimal) minimum $z_-$ \\
+Domain Bounds & $[z_- - 5/\sqrt{f''(z_-)},\ z_+ + 5/\sqrt{f''(z_+)}]$, $f''(x)=12x^2-2\delta$ ($z_\pm$: the two minima) \\
+\midrule
+\textbf{2D Quadruple Well} & $f(x,y) = x^4 + y^4 - A(x^2 + y^2) + xy$, swept over $A\in\{2,\dots,30\}$; the depth gap between the two wells equals $A$ exactly \\
+Initialization & Uniformly sampled around the shallower diagonal minimum $(\varrho_-,\varrho_-)$ (genuinely suboptimal starting basin); target is the deeper anti-diagonal minimum $(\varrho_+,-\varrho_+)$ -- see Appendix~\ref{app:hyperparameter-methodology} \\
+Domain Bounds & $[-(\varrho_++m),\ \varrho_++m]^2$, $\varrho_-=\tfrac12\sqrt{2A-1}$, $\varrho_+=\tfrac12\sqrt{2A+1}$ ($\geq\varrho_-$), $m=5/\sqrt{\lambda_{\min}}$, $\lambda_{\min}=\min\big(f_{xx}(\varrho_-,\varrho_-)-|f_{xy}(\varrho_-,\varrho_-)|,\ f_{xx}(\varrho_+,-\varrho_+)-|f_{xy}(\varrho_+,-\varrho_+)|\big)$ \\
+\midrule
+\textbf{High-Dimensional Ackley} & $f(x)=-a\exp(-b\lVert x\rVert/\sqrt{d})-\exp(d^{-1}\sum_i\cos(cx_i))+a+e$, swept over $d\in\{10,20,\dots,90\}$. Both terms are per-coordinate averages, so $f=0$ at the origin for every $d$; target $f\le1$ \\
+Function Parameters & $a=20.0$, $b=0.2$, $c=2\pi$ \\
+Initialization & Uniformly sampled in $[-10, 10]^d$ \\
+Domain Bounds & $[-10, 10]^d$ \\
+\midrule
+\textbf{Lennard-Jones Cluster} & $E(\xx) = \sum_{i<j} 4(r_{ij}^{-12} - r_{ij}^{-6}) + E_{\text{conf}}(\xx)$ in reduced units ($\epsilon=r_0=1$), $N \in \{13, 38, 55, 75\}$ atoms ($d=3N$) \\
+Confinement term & $E_{\text{conf}}(\xx) = \kappa\sum_i \max(0,\|x_i\|-R_c)^2$ with $\kappa=10$, origin-centered: it prevents atoms evaporating into zero-gradient regions under the noise, pins the cluster by removing the translational zero mode, and vanishes identically on the reference global minimum \\
+Initialization & Uniform-in-ball, rejecting pairs closer than 0.9 \\
+Domain Bounds & $[-(R_c+2),\ R_c+2]^d$, $R_c = 1.5 N^{1/3} + 1.5$ \\
+\midrule
+\textbf{Transformer (modular addition)} & Training loss of a decoder-only transformer on $(a+b)\bmod p$, $p=53$, presented as $[a,b,{=}]$ and predicted from the final position; cross-entropy over a fixed $80\%$ subset of all $p^2$ pairs, evaluated FULL-BATCH so gradients are exact. Depth swept over $\{2,5,10,20,50\}$ \\
+Architecture & Pre-LN, $d_{\text{model}}=64$, 2 heads, MLP ratio 4, learned positional embeddings; $d_{\text{model}}$ and head count held fixed across the sweep so depth is the only architectural variable \\
+Optimization Dimension & $d$ = flattened parameter count, $1.07\times10^5$ (depth 2) to $2.51\times10^6$ (depth 50) \\
+Initialization & $n$ independent PyTorch default initializations, shared across all methods \\
+Target & Training loss $\le0.10$ (chance level $\log p\approx3.97$) \\
+Domain Bounds & $[-10,10]^d$ (never binding in practice) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Hyperparameter Selection Methodology}
+\label{app:hyperparameter-methodology}
+
+Each of the 100 independent runs (Table~\ref{tab:general_settings}) is indexed by an integer $\text{seed}\in\{0,\dots,99\}$, and every worker seeds NumPy's global RNG once via \texttt{np.random.seed(seed*1000)} before drawing that run's initial swarm and simulating every algorithm on it. This seed indexing is reused identically at every sweep point (every $\delta$, $A$, or $d$) rather than redrawn independently per point: \texttt{seed=7} at $\delta=5$ and \texttt{seed=7} at $\delta=25$ consume the same underlying draw from the same seeded RNG state, remapped only by that point's own initialization bounds. Consequently the 100-run samples at different sweep points are correlated, not independent, and the quartile error bars in Figure~\ref{fig:well-entry-time} should be interpreted as within-seed variability across the ensemble rather than as independent per-point confidence intervals.
+
+Two conventions govern every entry-time figure in this paper and are worth stating explicitly, since both affect how the curves should be read. First, a run that never reaches the target returns the timeout sentinel (max steps $\times\,\eta$) rather than a genuine entry time, so each plotted point is the mean over only those seeds whose logged status is \texttt{target\_reached}. A method's plotted curve is therefore conditional on success, and must be read together with its reached-fraction: where a baseline is faster than Softmin at a difficulty it only clears in a fraction of seeds, that mean is taken over the easier subset of the shared seed set, not over a comparable sample. Second, a point whose reached-fraction falls below $50\%$ is dropped from the plot entirely, to avoid a handful of lucky seeds rendering as a confident-looking point; points between $50\%$ and $90\%$ are plotted but annotated with the exact fraction. A curve that simply stops therefore marks the difficulty at which that method became unreliable, not the end of the sweep.
+
+Per-algorithm settings are collected in Tables~\ref{tab:softmin_hyperparams}--\ref{tab:cbo_hyperparams}. Learning rates are unified to $\eta=0.001$ across every benchmark and algorithm (the Theorem~\ref{thm:transition-time} verification drivers excepted, which use their own, separately-motivated small-noise/small-step-size regime). The Softmin inverse temperature $\beta$ is selected per benchmark family via a two-stage, code-audited procedure (\texttt{src/hyperparameter\_diagnostics.py}), evaluated at a representative \emph{middle}-of-sweep setting rather than the hardest one, so the choice is not fit to the one condition the sweep is meant to stress-test: (1) an initial screen measures the distribution of $\beta(f_i-J_\beta)$ across the ensemble, flagging candidate values where trailing particles are not uniformly driven into the exponentially-suppressed regime; (2) because that screen alone favors values that are too small -- it only measures whether every particle receives rescue-drift, not what the reported first-entry-time metric rewards, namely the single fastest particle reaching the target, which benefits from a \emph{concentrated} ensemble via the leading particle's pre-factor approaching $n$ -- the candidates are then validated directly by measuring actual entry time. Across every benchmark tested (1D double well, 2D quadruple well, high-dimensional Ackley, and a spot check on Lennard-Jones), this second step confirmed $\beta=10$ as at or near the empirical optimum, matching the value used throughout; going lower is consistently slower or fails to reach the target at all, and going higher does not help (and is markedly worse on the quadruple well). The same direct-validation procedure was applied to Simulated Annealing's geometric cooling rate, and to comparing $\beta$ held fixed against both a decaying and an increasing schedule -- see Remark~\ref{rem:higher-dim} for the latter result. The Lennard-Jones benchmark additionally clips the gradient's Lennard-Jones term (never the confinement term, whose restoring force must scale freely to remain able to pull back an atom that has drifted outside the container) to a per-atom norm of 1.0 before the swarm's discrete update, applied identically to every algorithm; this clip is not applied to the L-BFGS-B local polish (``quench'') of each method's final configuration, which uses the true, unclipped gradient throughout, since a quasi-Newton method's curvature estimate is only valid for the true gradient. The transformer benchmark likewise applies a per-particle gradient-norm clip, at $10$, again identically for every algorithm; that value is selected in Table~\ref{tab:transformer_calibration} and is loose enough to reproduce the unclipped loss exactly, so it bounds a pathological step without shaping the dynamics.
+
+\paragraph{Baseline calibration.} Simulated Annealing, CBO, and PSO were each given the same diagnostic-guided procedure as Softmin's $\beta$ and, where a comparable parameterization exists, the same candidate budget (Table~\ref{tab:calibration_budget}), rather than literature-standard values adopted without checking. The three cases are reported below; two of them end in negative results, which we report as such.
+
+\paragraph{Simulated Annealing.} Seven candidate cooling rates were derived from target cooling \emph{timescales} $t^\star\in\{10^3,3{\times}10^3,10^4,3{\times}10^4,10^5,3{\times}10^5,10^6\}$ -- the number of steps to reach $5\%$ of the initial temperature, $\text{rate}=0.05^{1/t^\star}$ -- rather than hand-picked decimals, and validated by direct entry-time measurement in the same way as $\beta$; the rate $0.99995$ was confirmed on both wells. The initial temperature $T_0$ is inherently problem-scale-dependent, so no universal literature default exists, and it was calibrated separately. Escape time is a degenerate criterion for $T_0$ in this continuous, always-accept diffusion, since larger $T_0$ is monotonically faster with no interior optimum and eventually indistinguishable from bounded random search; we therefore used a Kramers/Arrhenius criterion instead. Five candidates $T_0=c\,h$ with $c\in\{0.25,0.5,1,2,4\}$, where $h$ is the double well's mid-sweep barrier height, were scored by the closed-form escape factor $\exp(-h/T_0)$, and we selected the value placing that factor in the \emph{low} band $[0.01,0.05]$: a genuine, non-trivial barrier, rather than the near-unity band a literal reading of the discrete-Metropolis initial-acceptance-ratio heuristic \citep{kirkpatrick1983optimization} would suggest, which would leave the barrier thermodynamically negligible from $t=0$ and trivialize precisely the obstacle this baseline is meant to face. The selected $T_0=h/4$ reached the target within a few hundred steps at the calibration midpoint and transferred to the quadruple well. It nonetheless fails at the hardest points of the double-well sweep ($h\gtrsim156$). That failure is a property of the cooling schedule rather than of the step budget: with early stopping disabled and a horizon of $1{,}500{,}000$ steps, fifteen times the original probe, the best value found is unchanged from step $10{,}000$ onward at both $h=156.1$ and $h=224.8$, consistent with the geometric cooling driving the temperature to $\approx0$ well before step $200{,}000$ and freezing the dynamics. Applying the same criterion to Ackley's own barrier scale was inconclusive even at a five-times-longer diagnostic budget, so Ackley and Lennard-Jones retain $T_0=10$.
+
+\paragraph{CBO.} The same 11-value $\beta$ grid used for Softmin was swept, together with two annealed-schedule variants (growth-only, matching CBO's own literature convention rather than Softmin's decaying schedule). Every candidate times out through consensus collapse on the double well, the quadruple well, \emph{and} Ackley, at the identical step regardless of which $\beta$ was used: direct testing across $\beta\in\{0.01,0.02,0.1,1.0,10.0\}$ produced position collapse at the same step on every benchmark tested. The collapse is therefore a $\beta$-independent structural property of vanilla CBO's self-shrinking anisotropic diffusion, not a symptom of a poorly chosen $\beta$. Since the choice is empirically immaterial, we report $\beta=0.01$, which lies in CBO's literature-typical range.
+
+\paragraph{PSO.} PSO has no single temperature-like scalar to sweep, so six named, literature-grounded $(w,c_1,c_2)$ triples were tested instead: the canonical Clerc--Kennedy constriction coefficients \citep{clerc2002particle}; the original Kennedy--Eberhart rule \citep{kennedy1995particle}; both endpoints of the Shi--Eberhart linearly-decreasing-inertia schedule \citep{shi1998modified}; a social-weighted variant biased toward the swarm's global best; and a deliberately non-contractive stress-test triple. All six were pre-filtered by a finite/at-bound stability probe. On the double well and quadruple well, PSO shows the same negative result as CBO. On Ackley, by contrast, the literature-standard constriction coefficients themselves \emph{fail}, timing out through consensus collapse at every dimension probed ($d=50,70,90$), while two of the six alternatives succeed at all three; the faster of those, $(w,c_1,c_2)=(0.4,2.0,2.0)$, was adopted for Ackley and is used both in Section~\ref{sec:ackley-benchmark} and for the Ackley-$d{=}50$ ablation in Appendix~\ref{apx:ablation-study}. A spot check found it also improves the Lennard-Jones quenched result, so it is used there too (Table~\ref{tab:general_settings}).
+
+\begin{table}[!htbp]
+\centering
+\caption{Calibration budget: candidate values/triples tested, per benchmark family, for each algorithm's diagnostic-guided tuning pass. PSO's lower total reflects having no schedule mechanism to test (see text), not less scrutiny. SA's ``schedule variants'' column is its $T_0$ candidates, evaluated once at the double-well midpoint (not per benchmark, see text) rather than a decaying/growing schedule.}
+\label{tab:calibration_budget}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Fixed candidates} & \textbf{Schedule/$T_0$ variants} & \textbf{Total per benchmark} \\
+\midrule
+Softmin & 11 & 2 & 13 \\
+SA & 7 & 5 & 12 \\
+CBO & 11 & 2 & 13 \\
+PSO & 6 & 0 & 6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Hyperparameters for Softmin energy dynamics.}
+\label{tab:softmin_hyperparams}
+\begin{tabular}{@{}lp{0.55\textwidth}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Learning Rate ($\eta$) & 0.001 (analytic benchmarks), 0.1 (transformer), 0.01 (Thm.~\ref{thm:transition-time} verification) \\
+Adaptive Learning Rate (Adagrad) & Disabled (False) \\
+Noise Intensity ($\sigma$) & 1.0 (analytic benchmarks), $10^{-5}$ (transformer), 0.05 (Thm.~\ref{thm:transition-time} verification) \\
+Noise Distribution & Normal \\
+Fixed Inverse Temperature ($\beta$) & 10.0 (all benchmarks, including the transformer), 2.0 (Thm.~\ref{thm:transition-time} verification and the $\beta=2$ ablation) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Hyperparameters for Simulated Annealing (SA). $T_0$ differs by benchmark family: the wells' value is Kramers-factor calibrated and validated (see Appendix~\ref{app:hyperparameter-methodology}); Ackley and Lennard-Jones retain $T_0=10$, since the same calibration attempt was inconclusive there, and the transformer uses the same value; $T_0$ has no problem-independent literature standard.}
+\label{tab:sa_hyperparams}
+\begin{tabular}{@{}lp{0.45\textwidth}@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Learning Rate ($\eta$) & 0.001 (analytic benchmarks), 0.1 (transformer) \\
+Base Noise Variance Factor & $2 \times \sigma \times \eta$ \\
+Initial Temperature ($T_0$) & 14.0283 (1D/2D wells), 10.0 (Ackley, Lennard-Jones, transformer) \\
+Cooling Schedule & Geometric \\
+Geometric Cooling Rate & 0.99995 (1D/2D wells, re-validated via a 7-candidate timescale sweep), 0.9999 (Ackley, Lennard-Jones, transformer) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Hyperparameters for overdamped Langevin dynamics. On every benchmark it uses the same step
+size and noise level as Softmin, with no schedule and no interaction; with a single particle,
+Softmin's update coincides with it exactly.}
+\label{tab:langevin_hyperparams}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Learning Rate ($\eta$) & 0.001 (analytic benchmarks), 0.1 (transformer) \\
+Noise Intensity ($\sigma$) & 1.0 (analytic benchmarks), $10^{-5}$ (transformer) \\
+Update & $x\gets x-\eta\nabla f(x)+\sqrt{2\sigma\eta}\,\xi$, \ $\xi\sim\mathcal{N}(0,I_d)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Hyperparameters for the deterministic first-order baselines, used only on the transformer
+benchmark (Section~\ref{sec:transformer}). Both are run at their literature-standard defaults
+rather than tuned for this benchmark, which is the counterpart of the carried-over,
+not-re-tuned convention applied to every other method there. Both are also run as $n=10$
+\emph{independent} chains, so they receive the same restart budget and the same per-step cost as
+the Softmin ensemble they are compared against.}
+\label{tab:adam_sgd_hyperparams}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Adam} & \textbf{SGD} \\
+\midrule
+Learning Rate ($\eta$) & 0.001 & 0.01 \\
+Momentum & $\beta_1=0.9$, $\beta_2=0.999$ & 0.9 (heavy-ball) \\
+Numerical Stability ($\varepsilon$) & $10^{-8}$ & --- \\
+Injected Noise & None (deterministic) & None (deterministic) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Diagnostic-guided calibration for the transformer benchmark
+(\texttt{src/calibrate\_transformer.py}), run at the mid-sweep depth 10 with a 4-particle ensemble,
+the same convention every other benchmark family uses. Losses are the best reached within the
+stated budget; chance level is $\log p=3.970$, so a value at or above it means the method has not
+learned anything at all. Two constraints bind rather than one. The learning rate is the dominant
+one: $\eta=10^{-3}$ does not move the iterate at any clip. The gradient clip binds as well, which a
+first pass on a 1-layer model had missed -- at this depth the per-particle gradient norm averages
+$0.9311$ and reaches $1.0341$, so clipping at $1$ costs more than an order of magnitude in final
+loss, while clipping at $10$ reproduces the unclipped result exactly. The selected configuration is
+$\eta=0.1$, clip $10$, $\beta=10$, $\sigma=10^{-5}$; see Appendix~\ref{apx:transformer} for why $\beta$
+and $\sigma$ are not set to this sweep's nominal optima, $\beta=100$ and $\sigma=0$, at which the
+noise-level stage was run. The selected configuration is used unchanged at every depth of the sweep.}
+\label{tab:transformer_calibration}
+\begin{tabular}{@{}llr@{}}
+\toprule
+\textbf{Stage} & \textbf{Candidate} & \textbf{Best loss} \\
+\midrule
+\emph{Learning rate and clip} (400 steps) & & \\
+  & $\eta=10^{-3}$ (carried over), any clip & 3.9996 \\
+  & $\eta=10^{-2}$, any clip                & 3.9645 \\
+  & $\eta=0.1$, clip $1.0$                  & 1.1648 \\
+  & $\eta=0.1$, clip $10$ or none (adopted) & \textbf{0.0754} \\
+\midrule
+\emph{Inverse temperature} (800 steps) & & \\
+  & $\beta=0.1$   & 0.0157 \\
+  & $\beta=1$     & 0.0042 \\
+  & $\beta=10$ (shared value, adopted) & \textbf{0.0028} \\
+  & $\beta=100$   & 0.0024 \\
+\midrule
+\emph{Noise level} (800 steps, $\beta=100$) & & \\
+  & $\sigma=0$ (degenerate, see text) & 0.0024 \\
+  & $\sigma=10^{-5}$ (adopted)        & \textbf{0.0065} \\
+  & $\sigma=10^{-4}$                  & 0.0485 \\
+  & $\sigma=10^{-3}$                  & 3.9537 \\
+  & $\sigma=10^{-2}$                  & 4.0800 \\
+\midrule
+Reference & Adam, $\eta=10^{-3}$, 800 steps & 0.0010 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Hyperparameters for Gradient-Enhanced Particle Swarm Optimization (PSO). The literature-standard constriction coefficients were found, by direct escape-time testing, to fail on Ackley specifically (all dimensions tested); a diagnostic-guided alternative is used there instead (see Appendix~\ref{app:hyperparameter-methodology}).}
+\label{tab:pso_hyperparams}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Gradient Step Learning Rate ($\eta$) & 0.001 \\
+Inertia Weight ($w$) & 0.729 (1D/2D wells), 0.4 (Ackley, Lennard-Jones) \\
+Cognitive Coefficient ($c_1$) & 1.49445 (1D/2D wells), 2.0 (Ackley, Lennard-Jones) \\
+Social Coefficient ($c_2$) & 1.49445 (1D/2D wells), 2.0 (Ackley, Lennard-Jones) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Hyperparameters for Consensus-Based Optimization (CBO). $\beta=0.01$, CBO's literature-typical range (unlike PSO's constriction coefficients, CBO has no single canonical numeric $\beta$, but 0.01--0.02 is the commonly cited scale) . The value is immaterial here: an 11-value sweep including $\beta=0.01$, plus two annealed-schedule variants, found consensus collapse at the identical step regardless of $\beta$ on all three main benchmarks -- a $\beta$-independent structural negative finding, see Appendix~\ref{app:hyperparameter-methodology}.}
+\label{tab:cbo_hyperparams}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Learning Rate ($\Delta t$) & 0.001 \\
+Consensus Weight ($\lambda$) & 1.0 \\
+Exploration Noise ($\sigma_{\text{CBO}}$) & $\sqrt{2}$ \\
+Inverse Temperature ($\beta$) & 0.01 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experimental Details}
+\label{apx:experiment-details}
+
+This appendix gives, for each benchmark of Section~\ref{sec:numerical-experiments}, the precise
+setup, reporting conventions and detailed numbers behind the summary in the main text.
+
+\subsubsection{Protocol and Reporting Conventions}
+\label{apx:protocol}
+
+We evaluate the capacity of Softmin dynamics to escape local minima and outrun sub-optimal basins by comparing fixed-$\beta$ ($\beta=10$) Softmin against seven baselines: Simulated Annealing (SA) \citep{gelfand1990sampling}; overdamped Langevin dynamics \citep{welling2011bayesian}, a control that shares Softmin's step size and noise level but has no interaction; Gradient-Aware Consensus-Based Optimization (CBO) \citep{carrillo2021consensus}, with and without upward $\beta$-annealing; Gradient-Enhanced Particle Swarm Optimization (PSO) \citep{noel2012new}; and the canonical, gradient-free formulations of both CBO \citep{CarrilloChoiTotzeckTse2018, pinnau2017consensus} and PSO \citep{kennedy1995particle}. The ensemble-size sweep compares Softmin with Simulated Annealing alone, and the transformer benchmark with Simulated Annealing, Langevin dynamics, Adam and SGD. The continuous dynamics are discretized using the Euler--Maruyama scheme with step size $\eta$, and every entry time we report is in continuous-time units, that is (number of steps) $\times\,\eta$, except on the transformer benchmark, where the methods use different step sizes and entry time is reported in steps. Entry time is measured against a value-space target: for the wells, $0.15$ of that benchmark's own depth gap above the target well's value, so the tolerance scales with the sweep instead of being fixed in absolute terms; for Lennard-Jones, a tolerance of $10^{-2}$ above the literature global minimum; for Ackley, the absolute value $f\le1$; and for the transformer, a training loss of $0.10$. Each reported entry-time mean is taken over those seeds that actually reached the target, and any sweep point at which fewer than half the seeds reach it is omitted from the entry-time panels rather than plotted from a small surviving sample. Because that convention makes an unreliable method disappear rather than degrade, every entry-time result is accompanied by the reached-fraction at every swept point, with no cutoff and no masking, as a reliability panel or, for Ackley, in the caption of Figure~\ref{fig:ackley-experiments} and the text of Appendix~\ref{apx:ackley}, so a method's speed is never shown without its reliability. Landscape formulations, hyperparameters, initialization bounds, hardware specifications, and real per-particle gradient/objective evaluation counts and wall-clock time are detailed in Appendix~\ref{app:hyperparameters}; the source code is available at \citep{softmin_energy_2026}.
+
+One caveat frames everything that follows. Theorem~\ref{thm:transition-time} is a $\sigma\downarrow0$ statement, whereas the analytic benchmarks below run at $\sigma=1$ (the transformer benchmark uses $\sigma=10^{-5}$, see Appendix~\ref{apx:transformer}): at $\beta=10$ and $n=100$ the bound of \eqref{eq:barrier-cap} is $0.0372$ and the channel maximum it bounds is $u_c\approx0.0370$, so $u_c/\sigma\approx0.04$ and the reduced landscape along the channel is essentially flat relative to the noise. The large-deviation exponent therefore carries little information at the noise level used here, and these experiments should be read as testing whether the Softmin coupling helps in a practically relevant regime, not as a numerical confirmation of the exponent. The small-noise regime the theorem does describe is probed separately in Appendix~\ref{apx:theory-verification}, where $\sigma$ is swept toward $0$.
+
+\subsubsection{Double-Well and Quadruple-Well Benchmarks}
+\label{apx:wells}
+
+Both well families are swept through the quadratic coefficient of their defining quartic (Table~\ref{tab:general_settings}): $\delta$ for the 1D double well $f(x)=x^4-\delta x^2+0.05x$, and $A$ for the 2D quadruple well $f(x,y)=x^4+y^4-A(x^2+y^2)+xy$. We plot each sweep against the quantity that actually sets its difficulty rather than against the raw coefficient. For the double well this is the barrier height $h=f(s)-f(z_-)$, which grows like $\delta^2/4$, from $h=0.2$ at $\delta=1$ to $h=224.8$ at $\delta=30$; for the quadruple well it is the depth gap between the shallow diagonal minimum and the deep anti-diagonal one, which equals $A$ exactly (Appendix~\ref{app:hyperparameter-methodology}).
+
+We first check that simulations on a 1D double well, at the small noise the theorem requires, are consistent with the large deviation scaling of Theorem~\ref{thm:transition-time}; results are in Appendix~\ref{apx:other-experiments} (Figures~\ref{fig:theory} and \ref{fig:theory-sensitivity}), alongside the ascent-descent mechanism ablation (Appendix~\ref{apx:ablation-study}), the per-particle pre-factor illustration (Figure~\ref{fig:ascent-descent}), and the full cost comparison (Table~\ref{tab:cost_comparison}).
+
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{images/well_entry_time.png}
+  \caption{Mean first-entry time into the target on the double well (left, against barrier height)
+  and the quadruple well (right, against the depth gap), in continuous-time units
+  ($\text{steps}\times\eta$), \emph{conditional on success}: each point is the mean over only those
+  seeds that reached the target, with error bars spanning their interquartile range; a point below
+  a 50\% reached-fraction is omitted, and one between 50\% and 90\% is annotated with the exact
+  fraction. It must therefore be read against the reliability panels of
+  Figure~\ref{fig:experiments}: where a baseline lies below Softmin it is faster only on the subset
+  of seeds it solved, and a curve that stops marks unreliability rather than a missing run. The same
+  100 seeds are reused at every sweep point (Appendix~\ref{app:hyperparameter-methodology}), so the
+  bars reflect within-seed variability.}
+  \label{fig:well-entry-time}
+\end{figure}
+
+Figure~\ref{fig:experiments} (top left) reports reliability across barrier heights $h$. Softmin reaches the target in all 100 seeds at every $h$ tested, across a sweep spanning a factor of about $1100$ in barrier height ($h=0.2$ to $h=224.8$). Every baseline eventually fails. SA holds at 100\% while the barrier is small, then degrades as it grows: 86\% at $h=99.8$, 1\% at $h=156.1$, and 0\% at $h=224.8$. Langevin fails far earlier, already at 0\% by $h=24.9$ having succeeded at $h=6.2$. CBO and PSO, gradient-aware and canonical alike, reach the target in at most 3\% of seeds at any barrier height tested, far below the 50\% floor a point must clear to be plotted in Figure~\ref{fig:well-entry-time} (Appendix~\ref{app:hyperparameter-methodology}), and so never appear there.
+
+This separation is the qualitative signature Theorem~\ref{thm:transition-time} describes. A method whose quasipotential barrier is capped at order $1/\beta$ \emph{independently of the true barrier height} should keep escaping as $h$ grows, while a method governed by the true exponent $h$ -- SA and Langevin both -- should fail once $h$ is large enough, which is the pattern the top row shows. Softmin's entry time (Figure~\ref{fig:well-entry-time}, left) quantifies the same behavior from the other side: its mean grows from $0.12$ at $h=0.2$ to $13.2$ at $h=224.8$, a factor of about $110$ against that factor of about $1100$ in barrier height, that is, far more slowly than the barrier itself, whereas the escape time of a method governed by the true barrier grows exponentially in it. We put this no more strongly than consistency, for the reason given at the start of Section~\ref{sec:numerical-experiments}: at $\sigma=1$ the proven exponent is far too small to be the operative effect, and the ablation of Appendix~\ref{apx:ablation-study} finds the Gibbs weighting the more plausible source of the advantage at $\beta=10$. What the theory predicts and the data show is the same \emph{shape}, not an established causal link.
+
+SA is genuinely faster than Softmin wherever it still succeeds, and Figure~\ref{fig:well-entry-time} should not be read as saying otherwise: at the mid-sweep point $h=56.1$ SA reaches the target in a mean $0.22$ against Softmin's $3.67$. That comparison is conditional on success, however, and averages over only the seeds each method solved. Table~\ref{tab:cost_to_solution} prices the same runs without conditioning.
+
+Figure~\ref{fig:experiments} (right column) extends this to the 2D quadruple well, whose \texttt{particle\_init} and target sit at different depths, with a depth gap equal to $A$ exactly (Appendix~\ref{app:hyperparameter-methodology}, Table~\ref{tab:general_settings}). The same pattern holds and sharpens. Softmin again reaches the target at every depth gap tested (2 through 30, 100\% of seeds throughout), while SA's reached-fraction falls to 17\% by $A=25$ and 0\% by $A=30$, and Langevin fails already by $A=10$ (0\%, having succeeded at $A=5$). CBO and PSO reach the target in at most 3\% of seeds at every depth gap tested here; an independent, algorithm-agnostic stagnation check, logged per run (Appendix~\ref{app:hyperparameter-methodology}), confirms this is a genuine stall rather than an unreached timeout. As on the double well, SA is faster where it still succeeds ($0.15$ mean entry time at $A=15$ against Softmin's $0.26$), on the seeds it solved.
+
+\paragraph{Cost to solution.} Entry time counts steps, not the price of a solution. A practitioner cannot know in advance which instances a method will solve, so the cost that matters is the expected cost of obtaining a success, including the runs that produce none. We therefore report the expected running time (ERT) standard in black-box optimization benchmarking \citep{hansen2016coco}: the total cost over all 100 seeds divided by the number of successes, which under a restart model is the expected cost of the first success, and is undefined (infinite) where a method never succeeds. Table~\ref{tab:cost_to_solution} gives it in wall-clock seconds along the double-well sweep. The bottom row of Figure~\ref{fig:experiments} gives it at every sweep point of both benchmarks and for every method, measured instead in objective plus gradient evaluations: this unit does not depend on the hardware, and unlike gradient evaluations alone it also charges the canonical, gradient-free CBO and PSO, which use none. A gap marks a point at which no seed succeeded, so that the expected cost is infinite, and an isolated marker a point at which only a few did; the CBO and PSO markers at low barriers, and Simulated Annealing's single marker near $h=210$, are of this kind. In this unit Simulated Annealing's expected cost first exceeds Softmin's at $h=90.1$ on the double well, consistent with the crossover between $h=56.1$ and $h=99.8$ in the table, and at a depth gap of $21$ on the quadruple well.
+
+\begin{table}[!htbp]
+\centering
+\caption{Cost to solution on the 1D double well: expected running time (ERT) in wall-clock seconds, that is, total wall-clock over all 100 seeds divided by the number that reached the target, with the reached-fraction alongside. Measured on the sweep actually run, not a synthetic probe; both methods use $n=100$ particles and $\eta=0.001$, so per-step cost is identical and the difference is entirely in steps taken. SA is an order of magnitude cheaper than Softmin while the barrier is small, and the two cross between $h=56.1$ and $h=99.8$; past the crossover SA's cost diverges, reaching roughly $7{,}600\times$ Softmin's at $h=156.1$ before becoming unbounded at $h=224.8$, where no seed succeeds.}
+\label{tab:cost_to_solution}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+& \multicolumn{2}{c}{\textbf{Softmin}} & \multicolumn{2}{c}{\textbf{Simulated Annealing}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+\textbf{Barrier $h$} & \textbf{ERT (s)} & \textbf{Reached} & \textbf{ERT (s)} & \textbf{Reached} \\
+\midrule
+6.2   & 2.6  & 100\% & 0.2                & 100\% \\
+24.9  & 5.5  & 100\% & 0.4                & 100\% \\
+56.1  & 13.0 & 100\% & 0.8                & 100\% \\
+99.8  & 14.4 & 100\% & 302.3              & 86\%  \\
+156.1 & 23.5 & 100\% & 179{,}233.7        & 1\%   \\
+224.8 & 49.2 & 100\% & $\infty$           & 0\%   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Read this way the trade-off is a crossover, not a ranking. Where the barrier is small SA is the cheaper method outright, by roughly an order of magnitude, and we do not claim otherwise; averaged over only the runs it solves, across both well sweeps, SA costs $0.79$ s against Softmin's $11.68$ s. What changes past the crossover is not that SA becomes slower but that its cost stops being bounded at all: its geometric cooling drives the temperature to $\approx0$ after a fixed number of steps regardless of the barrier actually faced, so it freezes rather than slows, and additional budget does not recover it (Appendix~\ref{app:hyperparameter-methodology} verifies this directly at $1{,}500{,}000$ steps, fifteen times the original probe, with the best value unchanged from step $10{,}000$ onward). Softmin's ERT meanwhile grows by a factor of $19$ between $h=6.2$ and $h=224.8$, a factor of $36$ in barrier height, and by a factor of about $110$ in evaluations over the full sweep (Figure~\ref{fig:experiments}), which spans a factor of about $1100$. Aggregated over the full double-well and quadruple-well sweep the same asymmetry appears as a single number: Softmin's mean wall-clock is $11.68$ s against SA's $351.57$ s and Langevin's $1033.74$ s, a $30\times$ and $88\times$ difference, rising to $42\times$ and $384\times$ in ERT (Table~\ref{tab:cost_comparison}). Softmin's three wall-clock figures coincide in the same comparison because it never times out.
+
+\subsubsection{Lennard-Jones Cluster Benchmark}
+\label{apx:lj}
+
+Lennard-Jones clusters are our first benchmark for scaling with dimension: $N$ atoms interact through the pairwise potential $V(r)=4\epsilon\bigl[(r_0/r)^{12}-(r_0/r)^6\bigr]$ \citep{jones1924determination}, giving a search space of dimension $d=3N$ whose number of local minima grows exponentially in $N$. Here $r$ is the interatomic distance and $r_0$ the length scale, conventionally written $\sigma$; we rename it because $\sigma$ denotes the noise intensity throughout this paper. We work in reduced units, $\epsilon=r_0=1$. We use the $N\in\{13,38,55,75\}$ clusters ($d$ up to $225$) from the Cambridge Cluster Database \citep{wales1997global}, whose lowest known energies serve as the literature global minimum against which every method is scored. Following the standard basin-hopping convention of separating global search from local relaxation \citep{wales1997global}, each method's final configuration is locally polished, or \emph{quenched}, via L-BFGS-B to its nearest local minimum before scoring; we report this quenched configuration's energy gap above the literature global minimum, rather than the raw configuration's, so the comparison reflects basin-finding rather than residual local-convergence noise. The strict hit-time target used for the double-well and quadruple-well benchmarks above is rarely reached by any method (Softmin included) beyond the smallest cluster size, once $N\geq38$, so the quenched-energy gap is the informative comparison at this scale.
+
+Figure~\ref{fig:lj-experiments} reports the quenched-energy gap. Softmin's gap stays small and essentially flat across the full range tested (from $0$ at $N=13$ to $3.7$ at $N=75$), while every baseline's gap grows roughly linearly with $N$, from $1.8$--$5.6$ at $N=13$ to $23$--$30$ at $N=75$. Softmin's advantage over every baseline \emph{widens}, not narrows, as the cluster grows: the opposite of the ordinary curse-of-dimensionality intuition.
+
+\subsubsection{High-Dimensional Ackley Benchmark}
+\label{apx:ackley}
+\label{sec:ackley-benchmark}
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.75\linewidth]{images/ackley_dimensions.png}
+  \vspace{\baselineskip}
+  \caption{Generalized Ackley function in 10 to 90 dimensions: time to reach the target, averaged
+  over successful runs, with the conventions of Appendix~\ref{apx:protocol}. Softmin is missing in
+  10 and 20 dimensions, where it never reaches the target; Langevin dynamics and canonical CBO are
+  missing everywhere for the same reason.}
+  \label{fig:ackley-experiments}
+\end{figure}
+
+Our final benchmark is the generalized Ackley function in $d\in\{10,20,\dots,90\}$ dimensions, which superimposes a dense lattice of shallow local minima, generated by a cosine term, on a single smooth radial funnel. Both of its terms are per-coordinate averages, so its global minimum is $0$ at the origin for every $d$ and the hit-time target can be the fixed absolute value $f\le1$ with no dimension-dependent rescaling. This is the benchmark on which Softmin does worst, and Figure~\ref{fig:ackley-experiments} reports it in full.
+
+Particle Swarm Optimization is the fastest method here at every dimension, by a wide margin. PSO reaches the target in a mean $0.03$ at $d=10$, rising gently to $1.47$ at $d=90$, while Softmin does not reach it at all within the step budget at $d=10$ or $d=20$ (0\% of seeds) and is far slower where it does succeed: $5055$ at $d=30$, $97.9$ at $d=50$, $8.98$ at $d=90$. Simulated Annealing succeeds only at $d=10$; CBO degrades from 71\% reached at $d=10$ to 5\% at $d=30$; Langevin and canonical CBO never reach the target at any dimension tested.
+
+What separates the methods here, however, is not access to the gradient. The canonical gradient-free PSO is statistically indistinguishable from the gradient-enhanced form at every dimension, the two means agreeing to within $15\%$ throughout ($0.026$ vs.\ $0.027$ at $d=10$, $1.35$ vs.\ $1.47$ at $d=90$): at $\eta=0.001$ the gradient step contributes essentially nothing beside PSO's own velocity update. The split is instead between the PSO family and everything else. Outside that family, Softmin is the only method that becomes reliable as the dimension grows, reaching the target in every run from $d=40$ on after failing entirely at $d=10$ and $d=20$: Simulated Annealing drops to $0\%$ at $d=20$, both gradient-aware CBO variants fall below the $50\%$ reliability floor there and reach $0\%$ by $d=50$, and Langevin and canonical CBO never succeed at any dimension tested. Ackley therefore discriminates search dynamics rather than gradient information, and is a weak test of the question this paper is about.
+
+Read against dimension, moreover, the trend runs in Softmin's favor and tracks the theory. The barrier out of the global basin along a single coordinate direction, $\max_{t\in[0,1]}f(te_1)-f(0)$, falls monotonically as $d$ grows -- from $1.23$ at $d=10$ to $0.42$ at $d=90$ -- because both terms of Ackley are per-coordinate averages. Softmin's entry time falls with it, and the gap to PSO closes by nearly four orders of magnitude across the sweep, from a factor of about $3.6\times10^4$ at $d=30$ to a factor of $6$ at $d=90$. These barriers remain well above the switching level $r_c=0.100$ of Lemma~\ref{lem:channel-drift} at $\beta=10$, by a factor of $4$ to $12$, so the sign-reversal mechanism is active throughout, and Softmin's improvement is consistent with the barrier flattening of Theorem~\ref{thm:transition-time} rather than with the mechanism lapsing. We put this no more strongly than consistency: at the $\sigma=1$ used here the proven exponent is too small to be the operative effect, as noted at the start of Section~\ref{sec:numerical-experiments}, and agreement between two monotone trends is not on its own evidence of a causal link. Reliability moves the same way: Softmin's reached-fraction rises to $100\%$ from $d=40$ onward, so its $d=10$ and $d=20$ failures are plausibly the continuation of that trend against a fixed budget rather than a separate effect, though we did not confirm this by raising the budget, and at $d=90$ Softmin is the most reliable method in the comparison at $100\%$, against $96\%$ for gradient-enhanced PSO, $58\%$ for the canonical form, and $0\%$ for everything else.
+
+None of this overturns the headline: PSO is faster than Softmin at every dimension tested, and we do not claim otherwise. What Ackley establishes is the boundary of the claim: on a landscape whose difficulty is carried by a dense lattice of shallow minima on a smooth global funnel, and on which gradient information demonstrably buys nothing, barrier flattening delivers reliability but not speed. We do not identify what does drive PSO's advantage here. That its velocity-based attraction toward the swarm's global best is well suited to a single smooth funnel is a natural conjecture, but we have not tested it and nothing in our experiments distinguishes it from competing explanations; we record it as an open question rather than a finding. Softmin's $\beta$ was fixed at the mid-sweep dimension $d=50$ by the same pre-committed protocol applied to every benchmark family and every baseline (Appendix~\ref{app:hyperparameter-methodology}), and never re-tuned per dimension; the $d=10$ and $d=20$ results are therefore genuinely out-of-sample. We note finally that the PSO coefficients used here are not the literature-standard constriction values, which themselves fail at every Ackley dimension probed ($d=50,70,90$); they were selected by the same diagnostic-guided procedure applied to every baseline (Appendix~\ref{app:hyperparameter-methodology}).
+
+\subsubsection{Ensemble-Size Sweep}
+\label{apx:particle-sweep}
+
+Every benchmark above fixes the swarm at $n=100$ (Table~\ref{tab:general_settings}), so the
+reliability result is so far a statement at a single ensemble size. This section varies $n$
+directly, on the 2D quadruple well, at three depth gaps chosen to span Simulated Annealing's
+collapse at $n=100$: $A=10$ and $A=20$, where it reaches the target in every seed, and $A=30$,
+where it reaches it in none.
+
+The comparison is deliberately restricted to Softmin and Simulated Annealing, and is sharper than
+it first appears. Every method in this paper is run as an ensemble, so Simulated Annealing at
+ensemble size $n$ is $n$ \emph{independent} annealed chains: increasing $n$ hands it $n$ restarts
+of a single-chain method, and its reliability may well improve with $n$ for that reason alone. The
+question this sweep asks is therefore not whether an ensemble helps, which it does for both
+methods, but whether Softmin's \emph{coupling} buys anything beyond embarrassingly-parallel
+restarts at matched cost. Both methods perform the same $O(n)$ work per step, so per-particle
+evaluation counts are directly comparable at every $n$. Hyperparameters are held at the values
+calibrated at $n=100$ for this benchmark and are not re-tuned per $n$, so $n=100$ is the in-sample
+point and every other ensemble size is out-of-sample for both methods symmetrically.
+
+\paragraph{Reading Figure~\ref{fig:particle-sweep}.} Ensemble-size sweep on the 2D quadruple well at depth gap $A=20$, $n$ from 5 to 400 (log axis), 100 seeds per point. This is the one difficulty at which the two methods separate as $n$ varies: at $A=10$ both reach every seed at every $n$, and at $A=30$ Simulated Annealing reaches essentially none at any $n$, so neither discriminates. Both are shown in Figure~\ref{fig:particle-sweep-all}. Left: reliability, the fraction of seeds reaching the value-space target, plotted at every $n$ with no cutoff; the dashed line is the independent-restart law $1-(1-p)^n$ with the single per-chain probability $p=0.074$ fitted from $n=5$ alone and every larger ensemble extrapolated, not fitted (Table~\ref{tab:restart_law}). Center and right are deliberately two different accountings of cost, and the contrast between them is the point. Center: mean first-entry time over the seeds that reached the target \emph{only}, on which Simulated Annealing lies below Softmin throughout -- where it works, it is genuinely the faster method, and we do not claim otherwise. Right: expected cost to solution (ERT), the total per-particle gradient work over \emph{all} seeds divided by the number of successes, which charges each method for the runs it never solves. On that accounting the order reverses below $n=100$: at $n=5$ Simulated Annealing's conditional cost is $1.1\times10^4$ against an ERT of $5.3\times10^6$, because $68\%$ of its runs fail and contribute nothing to the conditional average.
+
+Softmin reaches the target in all $100$ seeds at every one of the $21$ (difficulty, ensemble size)
+combinations, including at $n=5$, a twentieth of the ensemble used everywhere else in this paper.
+Simulated Annealing splits sharply by difficulty, and the way it splits is the result of this
+section. At $A=10$ it also reaches every seed at every $n$. At $A=20$ its reliability climbs with
+$n$ exactly as independent restarts predict: fitting a single per-chain success probability from
+the smallest ensemble alone, $p=1-(1-0.32)^{1/5}=0.074$, the restart law $1-(1-p)^n$ predicts
+$0.54$, $0.85$, $0.98$ and $0.9996$ at $n=10,25,50,100$ against the measured $0.51$, $0.84$,
+$0.98$ and $1.00$, and an exact binomial test rejects the law at no swept point (smallest
+$p$-value $0.62$). The coupling in Softmin's interaction is what the ensemble buys that restarts
+do not: for $n=5$ \emph{independent} chains to reach every seed as Softmin does would require a
+per-chain probability of at least $0.49$, against the $0.074$ measured here. The comparison with
+Langevin dynamics sharpens this further. With $n=1$ the pre-factor is identically $1$, so Softmin's
+update reduces exactly to that of Langevin dynamics with the same $\eta$ and $\sigma$
+(Table~\ref{tab:langevin_hyperparams}), which on the quadruple well reaches the target in no seed from
+$A=10$ on even with $n=100$ independent particles (Appendix~\ref{apx:wells}). Five Softmin particles
+thus differ from five independent copies of a method that fails at all three depth gaps only in their
+interaction. At $A=30$ the same
+law, fitted from the single success observed across $400\times100$ chains, gives
+$p\approx2.5\times10^{-5}$, some $3000$ times smaller than at $A=20$, and no ensemble size tested
+recovers it: Simulated Annealing reaches $0\%$ of seeds up to $n=200$ and $1\%$ at $n=400$, while
+Softmin is at $100\%$ from $n=5$ on.
+
+\begin{table}[!htbp]
+  \centering
+  \caption{Simulated Annealing's reliability at $A=20$ against the independent-restart law
+  $1-(1-p)^n$, with the single per-chain probability $p=0.074$ fitted from $n=5$ alone and every
+  larger ensemble predicted, not fitted. Fractions of $100$ seeds. The last row is the two-sided
+  exact binomial $p$-value for the observed count under the predicted rate; none rejects at the
+  $5\%$ level. Softmin reaches $100\%$ at every $n$ at this difficulty and is omitted.}
+  \label{tab:restart_law}
+  \begin{tabular}{lccccccc}
+    \toprule
+    Ensemble size $n$ & 5 & 10 & 25 & 50 & 100 & 200 & 400 \\
+    \midrule
+    Observed          & 0.32 & 0.51 & 0.84 & 0.98 & 1.00 & 1.00 & 1.00 \\
+    Restart law       & (fit) & 0.54 & 0.85 & 0.98 & 1.00 & 1.00 & 1.00 \\
+    Binomial $p$      & --- & 0.62 & 0.67 & 1.00 & 1.00 & 1.00 & 1.00 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+That contrast is the signature Theorem~\ref{thm:transition-time} predicts. Restarts multiply a
+per-chain success probability without changing its exponent, so a mechanism whose escape rate is
+governed by the true barrier $h$ can be rescued by more chains at a moderate barrier and cannot be
+at a large one, while a mechanism whose effective barrier is capped independently of $h$ should not
+need them at either. We put this no more strongly than consistency, for the reasons given at the start of Section~\ref{sec:numerical-experiments}: at $\sigma=1$ the proven cap is too small to be the operative effect, and an
+agreement of this kind does not on its own establish the mechanism.
+
+The ensemble is not free, and the two methods spend it on opposite things. Both perform the same
+$O(n)$ work per step, so per-particle gradient counts are directly comparable between them at
+every $n$; charging each method for its failures as well as its successes, as the expected running
+time of Section~\ref{sec:double-quadruple-well} does -- the quantity plotted in the right panels of
+Figures~\ref{fig:particle-sweep} and~\ref{fig:particle-sweep-all} -- Softmin is cheapest at its \emph{smallest}
+ensemble at every difficulty ($1.5\times10^4$, $3.4\times10^4$ and $5.4\times10^4$ evaluations at
+$A=10,20,30$ with $n=5$), because it does not need the extra particles for reliability and pays for
+each one in gradient evaluations. Simulated Annealing's expected cost instead \emph{falls} with $n$
+wherever its reliability is still climbing, from $5.3\times10^6$ at $n=5$ to $6.0\times10^4$ at
+$n=100$ for $A=20$, because there the restarts are buying reliability it otherwise lacks. The
+resulting comparison is difficulty-dependent in the same way as Section~\ref{sec:double-quadruple-well}:
+at $A=10$ Simulated Annealing is cheaper at every $n$, by a factor of about $11$ at $n=5$; at
+$A=20$ Softmin is some $155$ times cheaper at $n=5$, and once Simulated Annealing's reliability
+saturates at $n\geq100$ the two sit within about a factor of two of each other in either direction;
+at $A=30$ Softmin's cheapest configuration costs $5.4\times10^4$ evaluations while Simulated
+Annealing's expected cost is infinite up to $n=200$ and $2.0\times10^{10}$ at $n=400$. None of this
+contradicts the center panels of the two figures, where Simulated Annealing lies below Softmin at
+every point of the sweep: that is cost on solved runs alone, and the reversal here is precisely the
+price of the seeds it does not solve. Which of the two accountings is the relevant one depends on
+whether a practitioner can tell in advance that a given instance will be solved; when they cannot,
+it is the expected cost that they pay.
+
+Two qualifications belong with this result. The first is that Simulated Annealing's disadvantage at
+$A=20$ is recoverable by brute force: by $n=100$ it reaches every seed, and from there the two expected
+costs are within about a factor of two of each other in either direction (Simulated Annealing's is
+lower at $n=100$ and $n=400$, and higher at $n=200$), so what the sweep establishes at this
+difficulty is a gap at small ensembles and not a permanent one
+(Section~\ref{sec:limitations}). The second concerns Softmin's own entry time at $A=30$, which is
+not monotone in $n$. The median over solved seeds falls from $9.43$ at $n=25$ to $1.18$ at $n=50$
+and rises again to $21.31$ at $n=100$, where the distribution also carries a heavy right tail
+($24\%$ of solved seeds above $t=50$) that the mean in Figure~\ref{fig:particle-sweep-all} reports
+as a spike. Because a whole-distribution shift of that size over $100$ seeds could still be an
+unlucky draw, we re-ran the three affected ensemble sizes on a \emph{disjoint} set of $100$ seeds
+with nothing else changed (\texttt{src/confirm\_particle\_anomaly.py}). It reproduces: the fresh
+medians are $11.74$, $1.18$ and $23.70$, keeping the same shape across $n$, and a Mann--Whitney
+test does not distinguish the two seed batches at any of the three points ($p=0.37$, $0.56$,
+$0.51$). The effect is therefore a property of the ensemble size at this difficulty rather than a
+sampling accident, and we have no explanation for it; we report it because it qualifies the cost
+panels, and note that reliability is untouched -- Softmin reaches every seed at every ensemble size
+swept, so the result this section is about does not rest on it.
+
+\paragraph{All difficulties.}\label{apx:particle-sweep-all}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/particle_sweep_all.png}
+    \caption{The ensemble-size sweep of Section~\ref{sec:particle-sweep} at all three depth gaps
+    (linestyle) rather than the $A=20$ slice of Figure~\ref{fig:particle-sweep}, for Softmin and
+    Simulated Annealing (color); panels as in that figure. The two omitted difficulties are
+    reported here because neither discriminates between the methods as $n$ varies, not because
+    they are unfavorable: at $A=10$ both reach every seed at every ensemble size, and at $A=30$
+    Softmin reaches every seed at every ensemble size while Simulated Annealing reaches none up to
+    $n=200$ and $1\%$ at $n=400$. In the right panel a missing point is an infinite ERT, i.e.\ a
+    configuration in which no seed ever solved the problem: Simulated Annealing at $A=30$ appears
+    only as the single isolated marker at $n=400$, at $2.0\times10^{10}$ evaluations, which is the
+    cost of its one success in $400\times100$ chains. The center and right panels also show
+    Softmin's entry time at $A=30$ (dotted blue) to be non-monotone in $n$, with a pronounced spike
+    at $n=100$; this is discussed in Appendix~\ref{apx:particle-sweep} and is a property of the
+    mean, which these panels report for consistency with every other benchmark in the paper.}
+    \label{fig:particle-sweep-all}
+\end{figure}
+
+\subsubsection{Transformer Benchmark}
+\label{apx:transformer}
+
+This appendix gives the setup of the transformer benchmark of Section~\ref{sec:transformer} and the
+detailed analysis behind its summary.
+
+\paragraph{Task.} The task is modular addition, $(a+b) \bmod p$ with $p=53$, presented to the model as the sequence
+$[a, b, {=}]$ and predicted from the final position. This is the standard controlled testbed for
+small transformers \citep{power2022grokking,nanda2023progress}, and, more directly relevant here, it
+is already established as an instrument for \emph{comparing optimizers} on transformer training
+\citep{tveit2025muon}, with its depth axis swept within the same task family
+\citep{manir2026grokking}. Transformer training is a genuinely hard non-convex problem rather
+than a stand-in for one \citep{ahn2023linear}, and small transformers are a recognized proxy for
+optimization difficulties that appear at scale \citep{wortsman2023smallscale}. Two practical
+properties matter for our purposes: the full dataset is small enough to take \emph{exact,
+full-batch} gradients, so the comparison keeps the exact-gradient setting used throughout this
+paper rather than introducing minibatch noise as a new confound; and the whole benchmark is
+reproducible from a seed with no data download.
+
+\paragraph{Depth sweep and baselines.} We sweep depth $\in\{2,5,10,20,50\}$ with $d_{\text{model}}$ and the head count held fixed, so
+depth is the only architectural variable; the flattened parameter count $d$ is the optimization
+dimension, from $1.07\times10^5$ at depth 2 to $2.51\times10^6$ at depth 50, some five to six orders
+of magnitude above the well benchmarks and three to four above the largest Lennard-Jones cluster. The range is
+deliberately wide. A shallower $\{1,2,4,6\}$ sweep did not produce a monotone difficulty gradient,
+with Adam solving depth 2 faster than depth 1, so we extended depth by an order of magnitude to
+test whether a deeper model would; as reported below, it does not. A feasibility probe
+(\texttt{src/probe\_depth\_feasibility.py}) confirms the deep end is genuinely trainable rather
+than a foregone failure: the measured gradient norm stays flat between $0.79$ and $0.93$ from
+depth 5 to depth 50, neither exploding nor vanishing, and Adam drives the loss well below chance
+at every depth tested. Alongside the swarm baselines we add Adam \citep{kingma2014adam} and SGD
+with momentum, without which a neural-network comparison would not be a comparison. Crucially,
+these are run as $n$ \emph{independent} chains exactly like every other baseline, so they receive
+the same $n=10$ restarts and the same per-step budget the Softmin ensemble consumes: the
+comparison is cost-matched rather than one-run-against-ten. All $n$ particles are evaluated in a
+single batched forward and backward pass, since a Softmin step costs one objective and one
+gradient evaluation per particle. Entry time is measured against a training-loss target of
+$0.10$, as for Lennard-Jones, and reliability is again the fraction of seeds reaching it. Consensus-Based and
+Particle Swarm Optimization are omitted here: they reach the target in at most $3\%$ of seeds at every
+difficulty on both well benchmarks, so sweeping them across five depths would spend a substantial part
+of the budget re-measuring a flat zero.
+
+\paragraph{Calibration.} Three settings do not transfer to weight space and are calibrated for this benchmark family by the
+same diagnostic-guided procedure applied to every other family
+(Appendix~\ref{app:hyperparameter-methodology}, Table~\ref{tab:transformer_calibration}), exactly
+as Simulated Annealing's $T_0$ and Particle Swarm Optimization's coefficients already are. The
+first is the learning rate. At $\eta=10^{-3}$, the value used on the analytic benchmarks, a step
+moves each coordinate by some $1.4\times10^{-6}$ against weights of scale $10^{-1}$, and the loss
+does not leave its initial value within any feasible budget: after 400 steps it sits at $3.9996$,
+\emph{above} the chance level $\log p=3.970$, at every gradient-clipping value tested. Adam is
+exempt by construction, since it rescales per coordinate; that is precisely why it must not be the
+only method able to move, and $\eta=0.1$ is selected instead. It remains stable at the deepest sweep point: the sweep runs the
+adopted configuration unchanged at every depth, and every run reaches the target at depth 50 as at
+every other depth.
+The second is the gradient clip, which a first calibration pass on a 1-layer model had found
+inactive and which does not stay inactive as depth grows: at depth 10 the per-particle gradient
+norm averages $0.9311$ but reaches $1.0341$, so a clip of $1$ does bind, and it costs a great
+deal -- at $\eta=0.1$ and 400 steps, clipping at $1$ reaches only $1.1648$ against $0.0754$ at
+$10$. We therefore raise the clip to $10$, which reproduces the unclipped loss to four decimals
+and so bounds a pathological step without shaping the dynamics. The third is the noise level. The per-step perturbation has standard deviation
+$\sqrt{2\sigma\eta}$, so at $\eta=0.1$ the analytic benchmarks' $\sigma=1$ would inject about $0.45$
+per coordinate, against weights of scale $10^{-1}$. Training breaks down long before that: already
+$\sigma=10^{-3}$ (a perturbation of about $0.014$) leaves the loss at $3.95$, at chance, and
+$\sigma=10^{-2}$ (about $0.045$) at $4.08$, above it. The sweep's own optimum is
+$\sigma=0$, which we deliberately do not adopt: it would reduce Simulated Annealing and Langevin
+dynamics to one and the same deterministic gradient descent, collapsing two of the four baselines
+into duplicates of each other. We use $\sigma=10^{-5}$, the
+smallest value that keeps every method's dynamics distinct, at a cost well inside the target
+margin.
+
+The inverse temperature is \emph{not} re-tuned: $\beta=10$ is carried over from every other
+benchmark. The sweep is decisive about its order of magnitude, since $\beta=0.1$ and $\beta=1$ do
+not learn here at all, but $\beta=10$ and $\beta=100$ both clear the target comfortably, so the
+shared value is kept rather than the nominal per-benchmark optimum. Adam and SGD use their
+literature-standard defaults, the corresponding convention for them.
+
+\paragraph{Reliability and depth.} Every method reaches the target on every seed at every depth: all 125 runs succeed.
+This benchmark therefore does not discriminate on
+reliability, and we draw no reliability conclusion from it. Nor did depth produce the difficulty
+gradient the sweep was designed around. Every baseline reaches the target \emph{sooner} in the
+deepest model than in the shallowest: from depth 2 to depth 50 the mean entry time falls by a
+factor of $2.48$ for SGD, $1.88$ for Langevin dynamics, $1.64$ for Adam, and $1.44$ for Simulated
+Annealing (Figure~\ref{fig:transformer}). Two explanations are plausible, and we tested
+neither: the training set is fixed at $2{,}247$ examples, which a larger model may simply fit more
+easily; and the model is a pre-normalized residual architecture, a design intended to keep added
+depth from degrading optimization. Either way, at this target the landscape is benign for every
+method tested, and what the benchmark measures is speed and dimensional scaling, not the escape
+from poor basins that the theory addresses.
+
+\paragraph{Speed and cost.} Measured in steps, Softmin's entry time is the least sensitive to depth of the five methods: its
+median stays between $340$ and $410$ steps at every depth, a spread of $1.21\times$ against
+$1.49\times$ to $2.49\times$ for the others. Its position relative to the baselines follows from
+that. It is faster than Simulated Annealing at every depth, by a factor of $3.8$ to $4.9$ in
+median entry time, and faster than Langevin dynamics, by $1.4$ to $2.3$. Against SGD its margin
+is $2.1$ at depth 2 and narrows as SGD speeds up with depth, to $1.13$ at depth 20, until SGD is
+marginally ahead at depth 50 (median $328$ steps against $342$; on the mean, which the slow run
+described below inflates, $327$ against $423$). Adam is the fastest method at every depth, by a
+factor of $2.8$ at depth 2 and $4.0$ to $4.5$ from depth 5 onward. Wall-clock time is less
+favorable to Softmin than step counts. The model evaluations are identical in number across
+methods, but Softmin's ensemble update is the most expensive per step, at $2.5$\,s against
+$2.0$\,s for Adam and $1.8$\,s for SGD at depth 50. SGD is therefore faster than Softmin in
+wall-clock from depth 5 onward, and Softmin's wall-clock margin over Langevin dynamics vanishes at
+depth 50, though it stays $2.7$ to $4.1$ times faster than Simulated Annealing.
+
+\paragraph{Slow runs.} One Softmin run is an outlier. At depth 50, seed 2 reaches the target at step $743$, against
+$333$ to $363$ for the other four seeds, while no other method is unusual on that seed. To tell a
+rare tail from a fluke, we reran Softmin alone for 25 seeds at depths 20 and 50. The ten seeds
+shared with the sweep reproduce its entry times and final losses exactly, so the slow run is a
+property of its seed and not of hardware nondeterminism. The slow runs recur: at depth 50, five
+of the 25 seeds take between $527$ and $743$ steps, separated by a clear gap from the other twenty,
+which all finish within $403$; at depth 20, one seed of 25 takes $551$ steps, against at most
+$385$ for the rest. The two rates do not differ significantly (Fisher's exact test, $p=0.19$).
+Nothing in the loss by step $250$ singles these seeds out: at depth 50 they rank 5th, 6th, 19th,
+21st and 24th of 25, and our checkpoints are too sparse to tell whether they plateau or descend
+more slowly. None comes close to failing, since the slowest uses $743$ of the $2{,}000$ allowed
+steps, and the medians reported above are robust to them: over 25 seeds Softmin's median is $345$
+steps at depth 50 and $360$ at depth 20. We ran the additional seeds for Softmin only, so we cannot
+say whether the other methods have a comparable tail: at a rate of one run in five, five seeds
+would show none of it a third of the time.
+
+\subsection{Further Experimental Results}
+\label{apx:other-experiments}
+
+\subsubsection{Theory Verification}
+\label{apx:theory-verification}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/theory_verification_honest.png}
+    \caption{$\sigma\log(\text{mean }\tau)$ vs. $\sigma$ at $\delta=3,4$, i.e.\ barrier heights $h=2.19$ and $h=3.93$ (both already in the saturated $h>r_c$ regime), against the theoretical asymptote $u_c=u(r_c,\beta,n)$. This is the quantity Corollary~\ref{cor:exit-time-conditional} would constrain -- $\lim_{\sigma\to 0}\sigma\log\E[\tau]=V_\beta\le u_h$, and $u_h=u_c$ in this saturated regime -- under the metastable-domain hypotheses that corollary assumes and that we do not verify here; the plot is therefore a consistency check, not a test of a proven identity. It is nonetheless the right quantity to plot, unlike a direct overlay of raw $\E[\tau]$ against $\exp(u_c/\sigma)$ at one fixed, non-vanishing $\sigma$, which conflates the proven log-asymptotic rate with an uncontrolled, $h$-dependent sub-exponential pre-factor. Both series trend toward $u_c$ as $\sigma$ shrinks, consistent with the corollary; neither is monotonic all the way down, which is expected finite-$\sigma$ behavior, not a violation.}
+    \label{fig:theory}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/theory_sensitivity.png}
+    \caption{Sensitivity of the same corollary check to the discretization step $\eta$ and particle count $n$, at $\delta=3,4$ ($h=2.19,3.93$). $\sigma\log(\text{mean }\tau)$ (left) reproduces Figure~\ref{fig:theory}; mean $\tau$ vs. $\eta$ (center) should flatten as $\eta\to 0$ if the discretization is close to its continuous-time limit; mean $\tau$ vs. $n$ (right) should only ever improve with more particles.}
+    \label{fig:theory-sensitivity}
+\end{figure}
+
+\subsubsection{Computational Cost Comparison}
+\label{apx:cost-comparison}
+
+\begin{table}[H]
+\centering
+\caption{Mean per-particle gradient/objective evaluation counts and wall-clock time, averaged over the full double-well/quadruple-well sweep actually run (not a short synthetic probe). Counts are per-particle (n\_particles $\times$ steps), not per vectorized call. Because a run that never escapes contributes its full step budget to the average, SA's and Langevin's large counts partly reflect how often they exhaust the budget without reaching the target (Figure~\ref{fig:experiments}), not a per-step cost difference -- every gradient-based method performs the same $O(n)$ work per step. Standard CBO/PSO have zero gradient evaluations by construction (gradient-free); Standard CBO's nonzero objective-evaluation count above PSO's reflects its consensus-weight computation, which re-evaluates the objective every step. The three wall-clock columns price the same runs three ways and must be read together. \emph{All runs} is the plain mean over all 5{,}900 runs, and is the column the timeout caveat above applies to. \emph{Solved} averages over just those seeds whose logged status is \texttt{target\_reached}, removing that confound entirely, and on it Simulated Annealing beats Softmin by roughly $15\times$: where SA works it genuinely is the cheaper method, and Table~\ref{tab:cost_to_solution} locates the barrier height at which that stops holding. \emph{ERT} is the expected running time \citep{hansen2016coco}: total wall-clock over all seeds divided by the number of successes, which under a restart model is the expected cost of the first success and so charges each method for its own failures. ERT is the column that reconciles the other two, and the only one that does not presuppose knowing in advance which instances a method will solve. Reached-fractions are pooled over both well sweeps and so sit below any individual sweep point's.}
+\label{tab:cost_comparison}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+& & & \multicolumn{3}{c}{\textbf{Wall-clock (s)}} & \\
+\cmidrule(lr){4-6}
+\textbf{Method} & \textbf{Grad. evals} & \textbf{Obj. evals} & \textbf{All runs} & \textbf{Solved} & \textbf{ERT} & \textbf{Reached} \\
+\midrule
+Softmin & 502{,}150 & 502{,}150 & 11.68 & 11.68 & 11.68 & 100.0\% \\
+Simulated Annealing & 14{,}149{,}330 & 14{,}149{,}330 & 351.57 & 0.79 & 485.21 & 72.5\% \\
+Langevin & 42{,}907{,}470 & 42{,}907{,}470 & 1033.74 & 68.44 & 4484.61 & 23.1\% \\
+CBO & 110{,}514 & 110{,}514 & 2.79 & 0.66 & 5491.64 & 0.1\% \\
+CBO Annealed & 110{,}807 & 110{,}807 & 2.79 & 1.01 & 16{,}449.79 & 0.0\% \\
+PSO & 99{,}868 & 99{,}868 & 2.43 & 0.04 & 1022.99 & 0.2\% \\
+Standard CBO & 0 & 1{,}363{,}282 & 18.08 & 2.40 & 9699.14 & 0.2\% \\
+Standard PSO & 0 & 99{,}852 & 1.31 & 0.02 & 514.56 & 0.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Ascent-Descent Mechanism Illustration}
+\label{apx:ascent-descent-illustration}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/ascent_descent_dynamics.png}
+    \caption{Per-particle effective learning rate $\prefactor{k}{\xx_t}$ over a single Softmin run on the 1D double well ($\delta=4$, i.e.\ $h=3.93$; 20 particles). Particles with $\prefactor{k}{\xx_t}>0$ descend (more strongly so above the $\prefactor{k}{\xx_t}=1$ line); particles with $\prefactor{k}{\xx_t}<0$ ascend, the mechanism the ablation study below tests directly.}
+    \label{fig:ascent-descent}
+\end{figure}
+
+\subsubsection{Ablation Study: Ascent-Descent Mechanism}
+\label{apx:ablation-study}
+
+We isolate the contribution of the sign-changing pre-factor $\prefactor{k}{\xx}$ itself by comparing the real (\emph{signed}) mechanism against two ablations: \emph{positive part}, $(\prefactor{k}{\xx})_+$, which freezes any particle the real mechanism would have pushed uphill instead of letting it ascend; and \emph{absolute value}, $|\prefactor{k}{\xx}|$, which forces every particle to always descend, at whatever magnitude the real mechanism would have applied. All three variants share the same Gibbs/softmax weighting $n\cdot w_k$ that scales $\prefactor{k}{\xx}$ in the first place -- only the sign treatment on top of it differs.
+
+\begin{figure*}[!htbp]
+  \centering
+  \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/ablation_double_well.png}
+  \end{minipage}\hfill
+  \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/ablation_quadruple_well.png}
+  \end{minipage}
+  \vspace{\baselineskip}
+  \caption{Ascent-descent mechanism ablation on the two swept well benchmarks (mean entry time over the seeds that reached the target, band spanning their interquartile range, vs.\ difficulty; same value-space target and status-based masking as Figure~\ref{fig:well-entry-time}).}
+  \label{fig:ablation-wells}
+\end{figure*}
+
+\begin{figure*}[!htbp]
+  \centering
+  \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/ablation_ackley_dim50.png}
+  \end{minipage}\hfill
+  \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/ablation_lj_n38.png}
+  \end{minipage}
+  \vspace{\baselineskip}
+  \caption{Ascent-descent mechanism ablation at two fixed, hard settings with no natural sweep axis (Ackley $d=50$, 100 seeds; Lennard-Jones $N=38$, 30 seeds), shown as per-seed distributions (violin plots) rather than a single mean-and-interquartile-range point per mode, since the three modes turn out to substantially overlap here.}
+  \label{fig:ablation-fixed}
+\end{figure*}
+
+The result is not the clean "signed wins, the ablations degrade" story the sign-flipping mechanism might suggest. On the two swept well benchmarks (Figure~\ref{fig:ablation-wells}), there is no consistent winner: at the easier settings signed is competitive or best (e.g. quadruple well $A=15$: signed $0.25$, positive part $0.29$, absolute $0.34$), but at harder settings absolute is clearly faster -- double well $\delta=15$ ($h=56.1$): signed $3.81$, positive part $3.06$, absolute $2.20$; quadruple well $A=30$: signed $32.69$, positive part $30.70$, absolute $10.82$, roughly $3\times$ faster than either alternative that still preserves or freezes the sign. At the two fixed, hard settings (Figure~\ref{fig:ablation-fixed}) the three modes are close to indistinguishable: Ackley $d=50$ entry time (mean $100.1$/$98.2$/$99.4$ for signed/positive part/absolute, all 100\% reached) and Lennard-Jones $N=38$ quenched-energy gap ($2.26$/$2.48$/$2.40$) show heavily overlapping distributions.
+
+Taken together, these four benchmarks suggest that preserving the sign of $\prefactor{k}{\xx}$ -- letting trailing particles genuinely ascend rather than merely stall or be redirected downhill -- is not what is doing most of the practical work in this noise regime ($\sigma=1$). The Gibbs/softmax weighting $n\cdot w_k$, identical across all three variants, already strongly suppresses trailing particles' contribution regardless of the sign convention applied on top of it; that shared attenuation is the more plausible source of the empirical advantage over the baselines on the well and Lennard-Jones benchmarks of Section~\ref{sec:numerical-experiments}. The sign-flipping ascent mechanism remains what Theorem~\ref{thm:transition-time} is stated and proved for, and is a $\sigma\to 0$ asymptotic statement -- these benchmarks run at a fixed, non-vanishing $\sigma$, and the ablation results here are consistent with the sign convention mattering more as $\sigma$ shrinks than it does at the noise level tested.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{images/ablation_quadruple_well_beta2.png}
+    \caption{Ascent-descent mechanism ablation on the 2D quadruple well at a lower inverse temperature ($\beta=2$, vs.\ $\beta=10$ above; 50 seeds per point, $A=2,\dots,20$), where the Gibbs weight $n\cdot w_k$ no longer concentrates sharply enough to mask the sign convention's effect.}
+    \label{fig:ablation-quadruple-well-beta2}
+\end{figure}
+
+The near-parity at $\beta=10$ raises a natural question: is it specific to that aggressive a weighting? A sharply concentrated Gibbs weight already suppresses trailing particles' contribution regardless of the sign convention applied on top of it, by the argument above, so a less concentrated weighting should let the sign convention's own effect show through more directly. Repeating the quadruple-well ablation at $\beta=2$ (Figure~\ref{fig:ablation-quadruple-well-beta2}) is consistent with this: at the easier settings absolute and positive part are faster than signed, sometimes markedly so (depth gap $7$: signed $2.58$, positive part $0.89$, absolute $0.88$), but this reverses once the barrier grows past a depth gap of about $10$ -- from depth gap $13$ through $19$ signed is consistently and substantially faster (e.g.\ depth gap $15$: signed $0.34$, positive part $1.89$, absolute $2.59$; depth gap $19$: signed $0.52$, positive part $1.13$, absolute $3.60$, nearly $7\times$ faster than absolute). At this lower temperature, preserving the sign of $\prefactor{k}{\xx}$ -- letting trailing particles genuinely ascend rather than merely stall or be redirected downhill -- appears to become the dominant factor as the barrier increases: in this sweep, as the escape gets harder, the variant that lets trailing particles actively climb out is the one that keeps up, which is consistent with the sign-flipping mechanism Theorem~\ref{thm:transition-time} is stated and proved for.
+
+\clearpage
+% \newpage
+% \input{checklist.tex}
+
+
+\section{Extended Limitations and Future Work}
+\label{apx:limitations}
+
+Our theoretical analysis provides rigorous guarantees in the small-noise regime where the Freidlin--Wentzell Large Deviation Principles apply. While the bound in Theorem~\ref{thm:transition-time} is not sharp -- in particular $u_c$ and $u_h$ are only upper-estimated by an explicit channel, not computed exactly for general $f$ -- a tighter characterization of the true quasipotential, together with intermediate-noise asymptotics, would sharpen the picture. Our equilibrium characterization (Theorem~\ref{thm:stationary-points}) requires no convexity assumption on $f$ whatsoever; the ensemble-descent estimate (Theorem~\ref{thm:ensemble-min}) guarantees the running minimum is nonincreasing regardless, but its exponential rate of convergence specifically to the global minimum requires a Polyak–\L{}ojasiewicz condition on the relevant sublevel set, as discussed after its statement. The exit-time consequence of Theorem~\ref{thm:transition-time} holds unconditionally only at the level of the quasipotential, and becomes an actual statement about $\E\tau^\sigma$ only under the unverified metastable-domain hypotheses of Corollary~\ref{cor:exit-time-conditional}; identifying the exact transition exponent between adjacent basins, and a rigorous large-deviation treatment of the annealed schedule $\beta_t$, remain open.
+
+A second gap is empirical, between what the theory describes and what the benchmarks measure. The analytic benchmarks run at $\sigma=1$, where the cap of \eqref{eq:barrier-cap} evaluates to $u_c\approx0.037$ and so is negligible against the noise; the ablation of Appendix~\ref{apx:ablation-study} correspondingly finds that at $\beta=10$ the sign-reversal mechanism the theory is built on is not what produces the observed advantage, with the Gibbs weighting shared by all three ablation variants the more plausible source. The mechanism does appear to become dominant at the lower temperature $\beta=2$ as barriers grow, consistently with the theory; but establishing that the proven mechanism drives the headline results would require either running the benchmarks down toward the small-noise regime or a control that removes the drift entirely, neither of which we do here. The Ackley results of Section~\ref{sec:ackley-benchmark} bound the claim from the other side. There the sign-reversal mechanism is active -- the landscape's barriers sit well above $r_c$ -- and Softmin's performance improves with dimension as those barriers shrink, yet PSO is faster at every dimension, on a benchmark where gradient information demonstrably contributes nothing. Barrier flattening is therefore not sufficient for competitive speed on a landscape whose difficulty is carried by the density of minima rather than by their depth. Why PSO in particular does so well here we leave open: we did not isolate the responsible mechanism, and the comparison identifies the limitation without explaining it. The ensemble-size sweep of Section~\ref{sec:particle-sweep} bounds the reliability claim from a third side. At the moderate depth gap $A=20$, Simulated Annealing's reliability is recovered in full by restarts alone once $n\geq100$, and from there its expected cost to solution sits within about a factor of two of Softmin's; the advantage we report at the paper's default $n=100$ is therefore specific to difficulties at which restarts have stopped working, and is not a uniform property of the method at every barrier height. The transformer benchmark of Section~\ref{sec:transformer} bounds it from a fourth side: every method reached the target on every seed at every depth, so our experiments contain no test of reliability on a neural-network objective, and on that benchmark Adam is several times faster than Softmin, while SGD catches up with it in steps as depth grows and is faster in wall-clock time from depth 5 on.
+
+Future work should address several important directions. First, extending convergence proofs and explicit convergence rates beyond the Polyak--\L{}ojasiewicz setting, particularly to objectives with multiple disconnected basins, would significantly broaden applicability. Second, analyzing the mean-field limit as $n \to \infty$ could provide insights into the scaling of the method with ensemble size and potentially yield dimension-free convergence rates; Section~\ref{sec:particle-sweep} measures that scaling empirically over $5\leq n\leq400$ and finds reliability already saturated at the bottom of that range, which such an analysis would need to explain. Third, although Theorem~\ref{thm:ensemble-min} guarantees the ensemble-descent bound for an arbitrary schedule $\beta_t$, our experiments (Remark~\ref{rem:higher-dim}) found that neither a decaying nor an increasing schedule improved on a well-chosen fixed $\beta$ on the benchmarks considered, contrary to the original motivation for annealing $\beta$ over time; understanding whether this is a property of these specific landscapes or a more general phenomenon, and whether an adaptive schedule driven by the ensemble's own state (rather than a fixed function of $t$) can do better, is an open, concrete direction. Fourth, our neural-network benchmark turned out to be one on which every method succeeds; whether Softmin's reliability advantage carries over to network-training problems on which runs do fail, where it could separate from Adam, remains untested. Finally, tighter estimates for the exponential rate in the small noise regime can sharpen the theoretical bound to match experimental evidence more closely.
+
+\end{document}

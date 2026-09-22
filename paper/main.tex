@@ -708,21 +708,19 @@ a more detailed analysis are given in Appendix~\ref{apx:transformer}.
 
 \begin{figure}[!htbp]
   \centering
-  \includegraphics[width=\linewidth]{images/transformer_depth.png}
+  \includegraphics[width=0.75\linewidth]{images/transformer_depth.png}
   \vspace{\baselineskip}
   \caption{Transformer training at depths from 2 to 50 layers, five seeds per method and depth.
-  Left: fraction of seeds reaching the target training loss; every method reaches it every time
-  (markers are offset horizontally so that they do not overlap). Right: steps needed to reach the
-  target, as the mean over seeds (line) and for each seed (faint points). Details in
+  Steps needed to reach the target training loss, as the mean over seeds (line) and for each seed
+  (faint points); markers are offset horizontally so that they do not overlap. Details in
   Appendix~\ref{apx:transformer}.}
   \label{fig:transformer}
 \end{figure}
 
-Every method reaches the target from every starting point at every depth
-(Figure~\ref{fig:transformer}, left), so this benchmark does not separate the methods on
+Every method reaches the target from every starting point at every depth, so this benchmark does not separate the methods on
 reliability. Nor did greater depth make training harder: every baseline reaches the target sooner
 in the deepest model than in the shallowest. What the benchmark does measure is speed at scale
-(Figure~\ref{fig:transformer}, right). Softmin trains every model it is given, and the number of
+(Figure~\ref{fig:transformer}). Softmin trains every model it is given, and the number of
 steps it needs barely changes with depth. It needs about a quarter of the steps of Simulated
 Annealing and fewer than Langevin dynamics at every depth. SGD, which speeds up as the model gets
 deeper, starts out twice as slow as Softmin and matches it at 50 layers, while Adam is three to
@@ -1482,13 +1480,13 @@ not learn here at all, but $\beta=10$ and $\beta=100$ both clear the target comf
 shared value is kept rather than the nominal per-benchmark optimum. Adam and SGD use their
 literature-standard defaults, the corresponding convention for them.
 
-\paragraph{Reliability and depth.} Every method reaches the target on every seed at every depth: all 125 runs succeed
-(Figure~\ref{fig:transformer}, left). This benchmark therefore does not discriminate on
+\paragraph{Reliability and depth.} Every method reaches the target on every seed at every depth: all 125 runs succeed.
+This benchmark therefore does not discriminate on
 reliability, and we draw no reliability conclusion from it. Nor did depth produce the difficulty
 gradient the sweep was designed around. Every baseline reaches the target \emph{sooner} in the
 deepest model than in the shallowest: from depth 2 to depth 50 the mean entry time falls by a
 factor of $2.48$ for SGD, $1.88$ for Langevin dynamics, $1.64$ for Adam, and $1.44$ for Simulated
-Annealing (Figure~\ref{fig:transformer}, right). Two explanations are plausible, and we tested
+Annealing (Figure~\ref{fig:transformer}). Two explanations are plausible, and we tested
 neither: the training set is fixed at $2{,}247$ examples, which a larger model may simply fit more
 easily; and the model is a pre-normalized residual architecture, a design intended to keep added
 depth from degrading optimization. Either way, at this target the landscape is benign for every
