@@ -1,24 +1,35 @@
 # Global Optimization via Softmin Energy Minimization
 
-Code accompanying the paper *Global Optimization via Softmin Energy Minimization*. This repository implements the Softmin Energy interaction $J_\beta(\mathbf{x})$ — an interacting-particle scheme that couples particles through their relative objective values to escape local minima faster than standard stochastic global-optimization methods — together with the baselines it's compared against (Simulated Annealing, overdamped Langevin diffusion, Consensus-Based Optimization, and Particle Swarm Optimization) and the experiment/plotting pipeline used to
-produce the paper's figures.
+Code accompanying the paper *Global Optimization via Softmin Energy Minimization*. The repository
+implements the Softmin energy interaction $J_\beta(\mathbf{x})$ — an interacting-particle scheme that
+couples particles through their relative objective values in order to escape local minima — together
+with the baselines it is compared against (Simulated Annealing, overdamped Langevin dynamics,
+Consensus-Based Optimization, Particle Swarm Optimization, and, on the neural-network benchmark, Adam
+and SGD), the experiment drivers, and the notebook that renders every figure in the paper.
 
 ## Repository layout
 
 ```
 .
 ├── src/
-│   ├── simulations.py          # Simulation base class + all algorithm implementations
-│   ├── potentials.py           # Benchmark objective functions (double well, Ackley, ...)
-│   ├── viz.py                  # Plotting helpers
-│   ├── experiments.py          # Resumable multiprocessing experiment harness
-│   ├── run_*.py                # Experiment drivers (see "Running experiments" below)
-│   ├── jobs/                   # SLURM sbatch scripts, one per driver
-│   ├── ICML_submission_code.ipynb  # Notebook that renders every figure from results/*.pkl
-│   ├── requirements.txt        # Pinned Python dependencies
-│   ├── results/                # Output of new (post-review) experiment runs -- starts empty
-│   └── results_NIPS/           # Archived .pkl/.csv data from the original NeurIPS submission
-└── paper/                      # Paper source (LaTeX)
+│   ├── simulations.py              # Simulation base class + the seven particle dynamics
+│   ├── potentials.py               # Analytic benchmarks (wells, Ackley, Lennard-Jones) — NumPy only
+│   ├── nn_objective.py             # PyTorch transformer objective, same `setting` contract
+│   ├── experiments.py              # Shared resumable multiprocessing harness
+│   ├── viz.py                      # Plotting helpers and the shared paper figure style
+│   ├── run_*.py                    # Experiment drivers (see "Experiment drivers" below)
+│   ├── hyperparameter_diagnostics.py   # Hyperparameter calibration for the analytic benchmarks
+│   ├── calibrate_transformer.py        # The same calibration for the transformer benchmark
+│   ├── probe_depth_feasibility.py      # Cost/feasibility probe for the transformer depth sweep
+│   ├── confirm_particle_anomaly.py     # Re-runs the A=30 entry-time anomaly on fresh seeds
+│   ├── extra_seeds_transformer.py      # Extra Softmin seeds characterizing one slow run
+│   ├── plot_quadruple_well_landscape.py # Visual check of the quadruple-well sweep bounds
+│   ├── jobs/                       # SLURM sbatch scripts, one per driver
+│   ├── ICML_submission_code.ipynb  # Notebook rendering every figure from results/
+│   ├── requirements.txt            # Dependencies (see "Installation")
+│   ├── results/                    # Current results: .pkl per run + master_*.csv logs (tracked)
+│   └── results_NIPS/               # Archived data from the earlier submission, kept for reference
+└── paper/                          # Paper source (LaTeX)
 ```
 
 ## Installation
@@ -27,62 +38,72 @@ produce the paper's figures.
 pip install -r src/requirements.txt
 ```
 
-NumPy, SciPy, and sympy versions are pinned deliberately — the published figures depend on exact numerical behavior that can shift subtly across minor versions.
+NumPy, SciPy, sympy, matplotlib and pandas are pinned deliberately: the published figures depend on
+exact numerical behavior that can shift across minor versions. PyTorch is deliberately left unpinned
+and is needed only for the transformer benchmark; install the CUDA build on a GPU machine, while the
+CPU wheel is enough to run everything else. `requirements_linux.txt` is a full freeze of the Linux
+environment used on the cluster, kept as a record of what actually ran.
 
 ## Reproducing the figures
 
-`src/results/` starts empty in this revision cycle — the `.pkl` data behind the original
-submission's figures has been archived to `src/results_NIPS/` (see "Running experiments" below
-for why: nearly every series needs a fresh cluster run to reflect the post-review code changes).
-Once `src/results/` has been populated by the drivers below:
+`src/results/` is populated and tracked, so the figures can be regenerated without re-running any
+experiment:
 
 ```bash
 cd src
 jupyter notebook ICML_submission_code.ipynb
 ```
 
-Run all cells top to bottom. The notebook contains no simulation logic itself; it only loads
-`results/*.pkl` and renders comparison plots. Until then, the cells that depend on `results/`
-data will raise `FileNotFoundError` — expected, not a bug.
+Run the cells top to bottom. The notebook contains no simulation logic: it loads `results/*.pkl` and
+`results/master_*.csv` and writes each figure to `paper/images/`. A cell whose inputs are missing
+reports that the corresponding driver has to be run first, rather than failing silently.
 
-## Running experiments
+## Experiment drivers
 
-Each `src/run_*.py` script is a self-contained, resumable experiment sweep:
+Each `src/run_*.py` script is a self-contained sweep that appends to its own `master_*.csv` in
+`results/`, and each is resumable: re-running it skips every `(experiment, parameter, seed)`
+combination already logged. They assume many cores for `multiprocessing.Pool`, so they belong on a
+cluster rather than a laptop; the transformer driver is the one that genuinely needs a GPU, and it
+runs its tasks serially in one process because CUDA does not survive `fork`.
 
-| Script | What it sweeps |
-|---|---|
-| `run_experiments_resumable.py` | Double well / quadruple well / Ackley (radius), all baseline algorithms |
-| `run_ackley_dimensions.py` | High-dimensional Ackley, dimensions 10–90 |
-| `run_theory_verification.py` | 1D asymmetric double well, exit time from the maximizing regime |
-| `run_ablation_experiment.py` | Ascent-descent mechanism ablation (signed / positive-part / absolute prefactor) |
-| `run_convergence_diagnostics.py` | Noise / learning-rate / particle-count sweeps checking the Theorem 3.1 exit-time bound |
+| Driver | Sweep | Log |
+|---|---|---|
+| `run_experiments_resumable.py` | Double well and quadruple well, all baselines | `master_experiment_log_decay.csv` |
+| `run_lennard_jones.py` | Lennard-Jones clusters, N = 13, 38, 55, 75 | `master_lennard_jones_log.csv` |
+| `run_ackley_dimensions.py` | Ackley in 10–90 dimensions | `master_high_dim_ackley_log_exp_on_dims.csv` |
+| `run_particle_sweep.py` | Ensemble size 5–400, Softmin vs. Simulated Annealing on the quadruple well | `master_particle_sweep.csv` |
+| `run_transformer.py` | Transformer depth 2–50 (GPU) | `master_transformer.csv` |
+| `run_theory_verification.py` | Small-noise exit times against the barrier-flattening bound | `master_theory_verification_init0_0p05.csv` |
+| `run_convergence_diagnostics.py` | Noise, learning-rate and particle-count sensitivity of those exit times | `master_convergence_diagnostics.csv` |
+| `run_ablation_experiment.py`, `run_ablation_quadruple_well.py` | Ascent-descent ablation (signed / positive-part / absolute pre-factor) on both wells | `master_ablation_log.csv` |
+| `run_ablation_ackley.py`, `run_ablation_lj.py` | The same ablation at fixed hard settings (Ackley d=50, Lennard-Jones N=38) | `master_ablation_ackley_log.csv`, `master_ablation_lj_log.csv` |
+| `run_ablation_beta2_quadruple_well.py`, `..._hybrid.py` | The same ablation at β=2, where the Gibbs weight no longer masks the sign convention | `master_ablation_beta2_quadruple_well*.csv` |
 
-Each is resumable: if interrupted, re-running the same script picks up where it left off (it skips any `(experiment, parameter, seed)` combination already logged in its CSV). They're designed to run on a cluster with many cores available for `multiprocessing.Pool`, not on a laptop.
+Supporting scripts: `hyperparameter_diagnostics.py` and `calibrate_transformer.py` implement the
+two-stage calibration applied identically to Softmin and to every baseline;
+`probe_depth_feasibility.py`, `confirm_particle_anomaly.py` and `extra_seeds_transformer.py` are the
+targeted follow-up runs reported in the appendix.
 
-## Running on the Toeplitz cluster
+## Running on a cluster
 
-These scripts are written for the Dipartimento di Matematica's Toeplitz cluster (`toeplitz.cs.dm.unipi.it`, SLURM-managed).
+The `src/jobs/*.sh` scripts are SLURM batch scripts, one per driver. They assume a cluster with a
+`gpu` partition (used for its core count by the CPU-only drivers, and for an actual GPU by the
+transformer driver), and they invoke a virtual-environment interpreter by absolute path rather than
+relying on `module` or `conda` being available on the compute nodes.
 
-1. **Clone the repo on the cluster.** This is a private repo, so plain HTTPS won't work
-   unauthenticated. From the cluster, either:
-   - Generate a dedicated SSH keypair *on Toeplitz* (`ssh-keygen -t ed25519`, no passphrase or a stored one — this key never needs to touch anything but GitHub) and add its public half as a read-only **Deploy Key** under the repo's GitHub Settings → Deploy keys, then
-     `git clone git@github.com:SaviozziSamuele/Softmin_v2.git`.
-   - Or use a fine-grained Personal Access Token scoped to just this repo:
-     `git clone https://<token>@github.com/SaviozziSamuele/Softmin_v2.git` (or let `git` prompt for username + token as the password).
+Before first use, adapt the site-specific lines in each script: the working directory, the
+interpreter path, the partition and node constraints, and the notification address. Then:
 
-   The repo includes `src/results_NIPS/` (~600 tracked `.pkl`/`.csv` files, archived from the
-   original submission), so the initial clone is larger than the code alone.
+```bash
+cd src
+sbatch jobs/run_theory_verification.sh
+squeue -u $USER
+```
 
-2. **Submit a job:**
-   ```bash
-   cd Softmin_v2/src
-   sbatch jobs/run_theory_verification.sh
-   squeue -u $USER
-   ```
-   Fill in each script's conda/venv activation `TODO` before first use — see `src/jobs/`.
-
-3. **Branching:** consider keeping a dedicated branch (e.g. `cluster`) that you fast-forward from `master` right before submitting a batch of jobs, rather than pointing the cluster checkout directly at `master`. Long sweeps can run for a long time; if `master` moves while a job is mid-run, you lose the guarantee that a given `results/*.pkl` came from the code you think it did. A dedicated branch (or just noting the commit hash per submission) keeps results reproducible without slowing down day-to-day development on `master`.
+Long sweeps are worth pinning to a fixed revision — a dedicated branch, or a commit hash recorded per
+submission — so that a given `results/*.pkl` can always be traced to the code that produced it.
 
 ## Paper
 
-`paper/main.tex` is the submitted paper; `paper/SoftMin_revised_theory.tex` is an in-progress theory revision — where the two disagree, the revised file is the source of truth for what the code should implement.
+`paper/` holds the LaTeX sources for the paper and its appendices, including the figures the notebook
+writes into `paper/images/`.
